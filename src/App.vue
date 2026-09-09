@@ -71,9 +71,11 @@ const dirty = computed(
 const tab = ref("graph"),
   tool = ref("outline"),
   selectedId = ref(null),
+  selectedIds = ref([]),
   snap = ref(true),
   panelOpen = ref(false),
-  lineAutoConnect = ref(true);
+  lineAutoConnect = ref(true),
+  multiSelectMode = ref(false);
 const graph = ref(null),
   fileInput = ref(null),
   labelInput = ref(null),
@@ -92,10 +94,16 @@ const paper = ref("letter"),
   monochrome = ref(true),
   darkMode = ref(false),
   custom = ref({ title: "", text: "" });
+const selectedItems = computed(() => {
+  const ids = new Set(selectedIds.value);
+  return report.value.items.filter((item) => ids.has(item.id));
+});
+const selectedCount = computed(() => selectedItems.value.length);
 const selected = computed(() =>
-  report.value.items.find((i) => i.id === selectedId.value),
+  selectedCount.value === 1 ? selectedItems.value[0] : null,
 );
 const selectedTitle = computed(() => {
+  if (selectedCount.value > 1) return `${selectedCount.value} objects selected`;
   const names = {
     rect: "Area / rectangle",
     outline: "Structure outline",
@@ -106,6 +114,22 @@ const selectedTitle = computed(() => {
     symbol: "Inspection mark",
   };
   return selected.value ? names[selected.value.type] || "Selected object" : "Selected object";
+});
+const selectedTypeSummary = computed(() => {
+  const names = {
+    rect: "areas",
+    outline: "outlines",
+    line: "lines",
+    curve: "curves",
+    freehand: "drawings",
+    label: "labels",
+    symbol: "marks",
+  };
+  const counts = {};
+  for (const item of selectedItems.value) counts[item.type] = (counts[item.type] || 0) + 1;
+  return Object.entries(counts)
+    .map(([type, count]) => `${count} ${names[type] || 'items'}`)
+    .join(' · ');
 });
 const selectedHasOptionalLabel = computed(() =>
   ["rect", "outline", "line", "curve", "freehand"].includes(selected.value?.type),
@@ -161,19 +185,32 @@ function recordHistory() {
   if (history.value.length > 70) history.value.shift();
   historyIndex.value = history.value.length - 1;
 }
+function setSelection(ids = [], primaryId = null) {
+  const valid = report.value.items
+    .map((item) => item.id)
+    .filter((id) => ids.includes(id));
+  selectedIds.value = [...new Set(valid)];
+  selectedId.value =
+    primaryId && selectedIds.value.includes(primaryId)
+      ? primaryId
+      : selectedIds.value.at(-1) || null;
+}
+function clearSelection() {
+  setSelection([]);
+}
 function undo() {
   recordHistory();
   if (canUndo.value) {
     historyIndex.value--;
     report.value = JSON.parse(history.value[historyIndex.value]);
-    selectedId.value = null;
+    clearSelection();
   }
 }
 function redo() {
   if (canRedo.value) {
     historyIndex.value++;
     report.value = JSON.parse(history.value[historyIndex.value]);
-    selectedId.value = null;
+    clearSelection();
   }
 }
 function changeItems(items) {
@@ -183,6 +220,10 @@ function changeItems(items) {
 function setTool(value) {
   tool.value = value;
   error.value = "";
+  if (value !== "select") multiSelectMode.value = false;
+}
+function toggleMultiSelectMode() {
+  multiSelectMode.value = !multiSelectMode.value;
 }
 function toggleTheme() {
   darkMode.value = !darkMode.value;
@@ -246,20 +287,22 @@ function patchSelectedPoint(axis, value) {
   recordHistory();
 }
 function deleteSelected() {
-  if (!selected.value) return;
-  report.value.items = report.value.items.filter(
-    (i) => i.id !== selectedId.value,
-  );
-  selectedId.value = null;
+  if (!selectedCount.value) return;
+  const ids = new Set(selectedIds.value);
+  report.value.items = report.value.items.filter((item) => !ids.has(item.id));
+  clearSelection();
   recordHistory();
 }
 function duplicateSelected() {
-  if (!selected.value) return;
-  const item = clone(selected.value);
-  item.id = uid();
-  item.points = translatePoints(item.points, 20, 20);
-  report.value.items.push(item);
-  selectedId.value = item.id;
+  if (!selectedCount.value) return;
+  const duplicates = selectedItems.value.map((item) => {
+    const copy = clone(item);
+    copy.id = uid();
+    copy.points = translatePoints(copy.points, 20, 20);
+    return copy;
+  });
+  report.value.items.push(...duplicates);
+  setSelection(duplicates.map((item) => item.id), duplicates.at(-1)?.id || null);
   recordHistory();
 }
 function download(bytes, name, type) {
@@ -375,7 +418,7 @@ function replaceReport(value, newRevision = 0, snapshot = null) {
   savedSnapshot.value = snapshot || JSON.stringify(normalized);
   history.value = [JSON.stringify(normalized)];
   historyIndex.value = 0;
-  selectedId.value = null;
+  clearSelection();
   // Reopened/imported drawings start in Select so existing marks are immediately editable.
   // A genuinely blank report still starts in Outline for the normal drawing workflow.
   tool.value = normalized.items.length ? "select" : "outline";
@@ -551,7 +594,7 @@ function keyboard(event) {
     redo();
     return;
   }
-  if (["Delete", "Backspace"].includes(event.key) && selected.value) {
+  if (["Delete", "Backspace"].includes(event.key) && selectedCount.value) {
     event.preventDefault();
     deleteSelected();
     return;
@@ -595,8 +638,8 @@ watch([() => JSON.stringify(report.value), paper, monochrome, tab], () => {
     previewTimer = setTimeout(buildPreview, 300);
   }
 });
-watch(selectedId, async () => {
-  if (selected.value?.type === "label") {
+watch([selectedId, selectedCount], async () => {
+  if (selectedCount.value === 1 && selected.value?.type === "label") {
     panelOpen.value = true;
     await nextTick();
     labelInput.value?.focus();
@@ -808,6 +851,15 @@ onBeforeUnmount(() => {
             </label>
             <button class="text-button compact" @click="breakLineChain">Break chain</button>
           </div>
+          <button
+            v-if="tool === 'select'"
+            class="toolbar-pill"
+            :class="{ active: multiSelectMode }"
+            :aria-pressed="multiSelectMode"
+            @click="toggleMultiSelectMode"
+          >
+            <Layers :size="15" /> {{ multiSelectMode ? 'Multi-select on' : 'Multi-select' }}
+          </button>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
               >Snap to grid</span
@@ -825,6 +877,7 @@ onBeforeUnmount(() => {
           ref="graph"
           v-model:items="report.items"
           v-model:selected-id="selectedId"
+          v-model:selected-ids="selectedIds"
           :tool="tool"
           :symbol="currentSymbol"
           :snap="snap"
@@ -833,6 +886,7 @@ onBeforeUnmount(() => {
           :grid-unit="report.gridUnit"
           :graph-style="report.graphStyle"
           :line-auto-connect="lineAutoConnect"
+          :multi-select-mode="multiSelectMode"
           @change="changeItems"
           @select-tool="setTool"
           @position="position = $event"
@@ -841,6 +895,8 @@ onBeforeUnmount(() => {
           <span
             ><Layers :size="14" /> {{ report.items.length }}
             {{ report.items.length === 1 ? "mark" : "marks" }}</span
+          ><span v-if="selectedCount" class="coordinate-readout"
+            >Selected {{ selectedCount }}</span
           ><span class="coordinate-readout"
             >X {{ Math.round(position.x / 10) }} · Y
             {{ Math.round(position.y / 10) }}</span
@@ -850,21 +906,21 @@ onBeforeUnmount(() => {
         </footer>
       </section>
       <aside class="inspector-panel" :class="{ 'panel-open': panelOpen }">
-        <template v-if="selected">
+        <template v-if="selectedCount">
           <div class="panel-heading">
             <div>
-              <span class="eyebrow">SELECTED OBJECT</span>
+              <span class="eyebrow">{{ selectedCount > 1 ? 'SELECTED OBJECTS' : 'SELECTED OBJECT' }}</span>
               <h2>{{ selectedTitle }}</h2>
             </div>
             <button
               class="icon-button"
-              aria-label="Deselect object"
-              @click="selectedId = null"
+              :aria-label="selectedCount > 1 ? 'Clear selection' : 'Deselect object'"
+              @click="clearSelection"
             >
               <X :size="18" />
             </button>
           </div>
-          <div class="panel-section">
+          <div v-if="selected" class="panel-section">
             <div class="field">
               <span class="field-label-row">
                 <span>Label / title</span>
@@ -1007,10 +1063,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
-            <div
-              v-if="selectedSupportsPattern"
-              class="field-pair"
-            >
+            <div v-if="selectedSupportsPattern" class="field-pair">
               <label class="field"
                 ><span>Area pattern</span
                 ><select
@@ -1086,6 +1139,33 @@ onBeforeUnmount(() => {
                 @click="deleteSelected"
               >
                 <Trash2 :size="16" /> Delete
+              </button>
+            </div>
+          </div>
+          <div v-else class="panel-section multi-select-panel">
+            <p class="multi-select-summary">
+              <strong>{{ selectedCount }} objects selected.</strong>
+              <span>{{ selectedTypeSummary || 'Mixed selection' }}</span>
+            </p>
+            <label class="setting-toggle object-label-toggle">
+              <span>
+                <strong>Multi-select mode</strong>
+                <small>Tap this on mobile, or use Shift-click on desktop, to add or remove items from the selection.</small>
+              </span>
+              <input type="checkbox" :checked="multiSelectMode" @change="toggleMultiSelectMode" />
+            </label>
+            <p class="small-help">
+              Drag any selected item to move the whole selection together. Use Delete to remove all selected objects, or Duplicate to copy them as a group. For detailed edits such as labels, measurements, or patterns, reduce the selection to one object.
+            </p>
+            <div class="multi-select-list">
+              <span v-for="item in selectedItems" :key="item.id" class="selection-chip">{{ item.type }}</span>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-secondary flex-1" @click="duplicateSelected">
+                <Layers :size="16" /> Duplicate group
+              </button>
+              <button class="btn btn-danger" @click="deleteSelected">
+                <Trash2 :size="16" /> Delete group
               </button>
             </div>
           </div>
@@ -1575,11 +1655,11 @@ onBeforeUnmount(() => {
           a walkway or slab. Use the Steps / stair symbol for stair runs.
         </p>
         <p>
-          <strong>Move, reshape, and rotate</strong>Choose Select. Drag a mark
+          <strong>Move, reshape, rotate, and group</strong>Choose Select. Drag a mark
           to move it, drag its round handles to reposition individual points,
           drag the square handles to resize, and drag the green rotate handle on
-          single-point labels or symbols to turn them. Arrow keys nudge the
-          selected object.
+          single-point labels or symbols to turn them. Use Shift-click on desktop
+          or Multi-select mode on touch devices to build a group selection.
         </p>
         <p>
           <strong>Repeated lines</strong>Line stays active so you can trace wall
@@ -1588,7 +1668,8 @@ onBeforeUnmount(() => {
         </p>
         <p>
           <strong>Zoom and pan</strong>Scroll or pinch with two fingers to zoom.
-          Choose Pan, or hold Space and drag. Fit restores the full grid.
+          Choose Pan, hold Space and drag, or on touch simply drag empty graph
+          space while Select is active. Fit restores the full grid.
         </p>
         <p>
           <strong>Keep and print your work</strong>Save keeps the complete

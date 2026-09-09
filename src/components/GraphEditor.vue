@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Plus, Minus, Maximize, Check, X, Crosshair } from "lucide-vue-next";
+import { Plus, Minus, Maximize, Check, X, Crosshair, Hand, MousePointer2 } from "lucide-vue-next";
 import ShapeItem from "./ShapeItem.vue";
 import { GRID, clone, newItem } from "../lib/model.js";
 import {
@@ -17,16 +17,19 @@ const props = defineProps({
   tool: String,
   symbol: Object,
   selectedId: String,
+  selectedIds: { type: Array, default: () => [] },
   snap: Boolean,
   scaleLabel: String,
   feetPerSquare: { type: Number, default: 2 },
   gridUnit: { type: String, default: "ft" },
   graphStyle: { type: Object, default: () => ({}) },
   lineAutoConnect: { type: Boolean, default: true },
+  multiSelectMode: { type: Boolean, default: false },
 });
 const emit = defineEmits([
   "update:items",
   "update:selectedId",
+  "update:selectedIds",
   "change",
   "select-tool",
   "position",
@@ -35,9 +38,15 @@ const svg = ref(null),
   view = ref({ x: -35, y: -35, w: 870, h: 890 }),
   drawing = ref(null),
   pending = ref([]),
-  lineAnchor = ref(null);
-const selected = computed(() =>
-  props.items.find((i) => i.id === props.selectedId),
+  lineAnchor = ref(null),
+  quickPan = ref(false),
+  marquee = ref(null);
+const selectedSet = computed(() => new Set(props.selectedIds || []));
+const selectedItems = computed(() =>
+  props.items.filter((item) => selectedSet.value.has(item.id)),
+);
+const singleSelected = computed(() =>
+  selectedItems.value.length === 1 ? selectedItems.value[0] : null,
 );
 const zoom = computed(() => Math.round((870 / view.value.w) * 100));
 const pointers = new Map();
@@ -49,10 +58,24 @@ let action = null,
 const radius = computed(() => (6 * view.value.w) / 870);
 const handleHitRadius = computed(() => (15 * view.value.w) / 870);
 const selectedBounds = computed(() =>
-  selected.value ? bounds(selected.value) : null,
+  singleSelected.value ? bounds(singleSelected.value) : null,
+);
+function mergeBounds(items) {
+  if (!items.length) return null;
+  const list = items.map((item) => bounds(item));
+  return {
+    x: Math.min(...list.map((box) => box.x)),
+    y: Math.min(...list.map((box) => box.y)),
+    right: Math.max(...list.map((box) => box.right)),
+    bottom: Math.max(...list.map((box) => box.bottom)),
+  };
+}
+const groupBounds = computed(() => mergeBounds(selectedItems.value));
+const selectedBoxes = computed(() =>
+  selectedItems.value.map((item) => ({ id: item.id, ...bounds(item) })),
 );
 const resizeHandles = computed(() => {
-  if (!selectedBounds.value || selected.value?.points.length < 2) return [];
+  if (!selectedBounds.value || singleSelected.value?.points.length < 2) return [];
   const b = selectedBounds.value;
   return [
     { key: "nw", x: b.x, y: b.y },
@@ -61,9 +84,8 @@ const resizeHandles = computed(() => {
     { key: "sw", x: b.x, y: b.bottom },
   ];
 });
-const selectionFrame = computed(() => {
-  if (!selectedBounds.value) return null;
-  const box = selectedBounds.value;
+function paddedFrame(box) {
+  if (!box) return null;
   const pad = handleHitRadius.value;
   const width = Math.max(box.right - box.x, pad * 2);
   const height = Math.max(box.bottom - box.y, pad * 2);
@@ -75,20 +97,22 @@ const selectionFrame = computed(() => {
     width: width + pad * 2,
     height: height + pad * 2,
   };
-});
+}
+const selectionFrame = computed(() => paddedFrame(selectedBounds.value));
+const groupFrame = computed(() => paddedFrame(groupBounds.value));
 const rotateHandle = computed(() => {
   if (
-    !selected.value ||
+    !singleSelected.value ||
     props.tool !== "select" ||
-    selected.value.points.length !== 1 ||
-    !["symbol", "label"].includes(selected.value.type)
+    singleSelected.value.points.length !== 1 ||
+    !["symbol", "label"].includes(singleSelected.value.type)
   )
     return null;
-  const center = selected.value.points[0];
+  const center = singleSelected.value.points[0];
   const handle = rotatePoint(
     { x: center.x, y: center.y - handleHitRadius.value * 2.6 },
     center,
-    selected.value.rotation || 0,
+    singleSelected.value.rotation || 0,
   );
   return { ...handle, center };
 });
@@ -101,7 +125,7 @@ const hint = computed(
   () =>
     ({
       select:
-        "Select a mark to move it. Drag the round handles to edit its points, the square handles to resize, or the rotate handle for symbols and labels.",
+        "Tap an object to select it. On desktop, Shift-click or drag a selection box to select multiple objects. On touch, drag empty space to pan and use Multi-select to add items.",
       outline:
         "Tap to add corners. Tap the first corner or choose Finish to close.",
       rect: "Drag from one corner to the opposite corner.",
@@ -132,6 +156,27 @@ function gridPoint(event) {
     screenPoint(event),
     props.snap && !["freehand", "curve"].includes(props.tool),
   );
+}
+function rawGridPoint(event) {
+  return constrained(screenPoint(event), false);
+}
+function setSelection(ids = [], primaryId = null) {
+  const valid = props.items.map((item) => item.id).filter((id) => ids.includes(id));
+  const unique = [...new Set(valid)];
+  emit("update:selectedIds", unique);
+  emit(
+    "update:selectedId",
+    primaryId && unique.includes(primaryId) ? primaryId : unique.at(-1) || null,
+  );
+}
+function toggleSelection(id) {
+  const ids = selectedSet.value.has(id)
+    ? props.selectedIds.filter((value) => value !== id)
+    : [...props.selectedIds, id];
+  setSelection(ids, ids.at(-1) || null);
+}
+function clearSelection() {
+  setSelection([]);
 }
 function updateItems(items) {
   emit("update:items", items);
@@ -170,6 +215,7 @@ function resetInteraction(restore = false) {
   action = null;
   before = null;
   drawing.value = null;
+  marquee.value = null;
 }
 function finishOutline(close = true) {
   if (pending.value.length >= 2) {
@@ -177,9 +223,8 @@ function finishOutline(close = true) {
       closed: close && pending.value.length >= 3,
     });
     commit([...props.items, shape]);
-    emit("update:selectedId", shape.id);
+    setSelection([shape.id], shape.id);
     // Explicitly finishing a structure enters edit mode so mistakes can be corrected.
-    // A tool switch uses close=false, so it must not override the user's newly chosen tool.
     if (close) emit("select-tool", "select");
   }
   pending.value = [];
@@ -187,6 +232,21 @@ function finishOutline(close = true) {
 function cancel() {
   pending.value = [];
   resetInteraction(true);
+}
+function movementForGroup(group, dx, dy) {
+  const box = mergeBounds(group.map((entry) => ({ points: entry.points })));
+  const allowedDx = clamp(dx, -box.x, GRID.width - box.right);
+  const allowedDy = clamp(dy, -box.y, GRID.height - box.bottom);
+  return { dx: allowedDx, dy: allowedDy };
+}
+function intersectsSelection(item, area) {
+  const box = bounds(item);
+  return !(
+    box.right < area.x ||
+    box.x > area.right ||
+    box.bottom < area.y ||
+    box.y > area.bottom
+  );
 }
 function pointerDown(event) {
   if (event.button > 0 && event.button !== 1) return;
@@ -206,7 +266,14 @@ function pointerDown(event) {
   }
   if (pointers.size > 1) return;
   const p = gridPoint(event);
-  if (props.tool === "pan" || event.button === 1 || space) {
+  const targetId = event.target.closest("[data-item-id]")?.dataset.itemId;
+  if (
+    props.tool === "pan" ||
+    quickPan.value ||
+    event.button === 1 ||
+    space ||
+    (event.pointerType === "touch" && props.tool === "select" && !targetId)
+  ) {
     action = {
       kind: "pan",
       x: event.clientX,
@@ -220,17 +287,13 @@ function pointerDown(event) {
     const rotate = event.target.closest("[data-rotate]");
     const resize = event.target.closest("[data-resize]");
     const handle = event.target.closest("[data-handle]");
-    const id = rotate || resize || handle
-      ? props.selectedId
-      : event.target.closest("[data-item-id]")?.dataset.itemId;
-    emit("update:selectedId", id || null);
-    if (id) {
+    if ((rotate || resize || handle) && singleSelected.value) {
       before = clone(props.items);
-      const original = clone(props.items.find((i) => i.id === id));
+      const original = clone(singleSelected.value);
       const box = bounds(original);
       action = {
-        kind: rotate ? "rotate" : resize ? "resize" : handle ? "handle" : "move",
-        id,
+        kind: rotate ? "rotate" : resize ? "resize" : "handle",
+        id: original.id,
         index: handle ? Number(handle.dataset.handle) : null,
         corner: resize?.dataset.resize || null,
         start: p,
@@ -240,7 +303,48 @@ function pointerDown(event) {
             ? original.points[0]
             : { x: (box.x + box.right) / 2, y: (box.y + box.bottom) / 2 },
       };
+      return;
     }
+
+    const additive = props.multiSelectMode || event.shiftKey || event.metaKey || event.ctrlKey;
+    if (targetId) {
+      if (additive) {
+        toggleSelection(targetId);
+        return;
+      }
+      const moveIds = selectedSet.value.has(targetId) && selectedItems.value.length > 1
+        ? [...props.selectedIds]
+        : [targetId];
+      setSelection(moveIds, targetId);
+      before = clone(props.items);
+      if (moveIds.length > 1) {
+        action = {
+          kind: "move-group",
+          ids: moveIds,
+          start: p,
+          originals: props.items
+            .filter((item) => moveIds.includes(item.id))
+            .map((item) => ({ id: item.id, points: clone(item.points) })),
+        };
+      } else {
+        const original = clone(props.items.find((item) => item.id === targetId));
+        action = { kind: "move", id: targetId, start: p, original };
+      }
+      return;
+    }
+
+    // Desktop users can drag a selection box. Touch users pan empty space instead.
+    if (event.pointerType !== "touch") {
+      marquee.value = { start: rawGridPoint(event), current: rawGridPoint(event) };
+      action = {
+        kind: "marquee",
+        start: rawGridPoint(event),
+        current: rawGridPoint(event),
+        additive,
+      };
+      return;
+    }
+    clearSelection();
     return;
   }
   // Ignore drawing outside the paper instead of pinning stray taps to its edge.
@@ -317,6 +421,11 @@ function pointerMove(event) {
     };
     return;
   }
+  if (action.kind === "marquee") {
+    action.current = rawGridPoint(event);
+    marquee.value = { start: action.start, current: action.current };
+    return;
+  }
   if (action.kind === "create") {
     if (["freehand", "curve"].includes(drawing.value.type)) {
       const points = drawing.value.points,
@@ -343,13 +452,17 @@ function pointerMove(event) {
     updateItems(
       props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
     );
-  } else if (action.kind === "handle") {
+    return;
+  }
+  if (action.kind === "handle") {
     const points = clone(action.original.points);
     points[action.index] = p;
     updateItems(
       props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
     );
-  } else if (action.kind === "move") {
+    return;
+  }
+  if (action.kind === "move") {
     const points = translatePoints(
       action.original.points,
       p.x - action.start.x,
@@ -357,6 +470,22 @@ function pointerMove(event) {
     );
     updateItems(
       props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
+    );
+    return;
+  }
+  if (action.kind === "move-group") {
+    const { dx, dy } = movementForGroup(
+      action.originals,
+      p.x - action.start.x,
+      p.y - action.start.y,
+    );
+    updateItems(
+      props.items.map((item) => {
+        const original = action.originals.find((entry) => entry.id === item.id);
+        return original
+          ? { ...item, points: translatePoints(original.points, dx, dy) }
+          : item;
+      }),
     );
   }
 }
@@ -390,8 +519,26 @@ function pointerUp(event) {
       color: tool === "symbol" ? symbol.color : "#183b42",
     });
     commit([...props.items, shape]);
-    emit("update:selectedId", shape.id);
+    setSelection([shape.id], shape.id);
     emit("select-tool", "select");
+  } else if (action?.kind === "marquee") {
+    const dx = action.current.x - action.start.x;
+    const dy = action.current.y - action.start.y;
+    if (Math.hypot(dx, dy) < 5) {
+      if (!action.additive) clearSelection();
+    } else {
+      const area = {
+        x: Math.min(action.start.x, action.current.x),
+        y: Math.min(action.start.y, action.current.y),
+        right: Math.max(action.start.x, action.current.x),
+        bottom: Math.max(action.start.y, action.current.y),
+      };
+      const hitIds = props.items.filter((item) => intersectsSelection(item, area)).map((item) => item.id);
+      const ids = action.additive
+        ? [...new Set([...props.selectedIds, ...hitIds])]
+        : hitIds;
+      setSelection(ids, ids.at(-1) || null);
+    }
   } else if (action?.kind === "create" && drawing.value) {
     const b = bounds(drawing.value),
       validSize = Math.hypot(b.right - b.x, b.bottom - b.y) > 2,
@@ -399,7 +546,7 @@ function pointerUp(event) {
     if (validStroke) {
       const created = clone(drawing.value);
       commit([...props.items, created]);
-      emit("update:selectedId", created.id);
+      setSelection([created.id], created.id);
       if (created.type === "line") {
         if (props.lineAutoConnect) lineAnchor.value = clone(created.points.at(-1));
         else clearLineAnchor();
@@ -428,7 +575,7 @@ function keydown(event) {
   if (event.key === "Escape") {
     event.preventDefault();
     cancel();
-    emit("update:selectedId", null);
+    clearSelection();
     // Repeat-line mode needs an obvious keyboard exit that does not require clicking the toolbar.
     if (props.tool === "line") {
       clearLineAnchor();
@@ -441,7 +588,7 @@ function keydown(event) {
     pending.value.pop();
   }
   if (
-    selected.value &&
+    selectedItems.value.length &&
     ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
   ) {
     event.preventDefault();
@@ -452,11 +599,23 @@ function keydown(event) {
       ArrowUp: [0, -amount],
       ArrowDown: [0, amount],
     }[event.key];
+    const ids = new Set(props.selectedIds);
+    const originals = props.items
+      .filter((item) => ids.has(item.id))
+      .map((item) => ({ id: item.id, points: clone(item.points) }));
+    const { dx, dy } = movementForGroup(originals, ...delta);
     commit(
-      props.items.map((i) =>
-        i.id === selected.value.id
-          ? { ...i, points: translatePoints(i.points, ...delta) }
-          : i,
+      props.items.map((item) =>
+        ids.has(item.id)
+          ? {
+              ...item,
+              points: translatePoints(
+                originals.find((entry) => entry.id === item.id).points,
+                dx,
+                dy,
+              ),
+            }
+          : item,
       ),
     );
   }
@@ -464,12 +623,20 @@ function keydown(event) {
 function releaseSpace() {
   space = false;
 }
+function toggleQuickPan() {
+  quickPan.value = !quickPan.value;
+}
+function switchToSelect() {
+  quickPan.value = false;
+  emit("select-tool", "select");
+}
 watch(
   () => props.tool,
   (value) => {
     finishOutline(false);
     resetInteraction(true);
     if (value !== "line") clearLineAnchor();
+    if (value !== "select") quickPan.value = false;
   },
 );
 watch(
@@ -567,14 +734,14 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
         </text>
       </g>
       <g clip-path="url(#paper-clip)">
-        <ShapeItem
-          v-for="item in items"
-          :key="item.id"
-          :item="item"
-          :feet-per-square="feetPerSquare"
-          :grid-unit="gridUnit"
-          :graph-style="graphStyle"
-        />
+        <g v-for="item in items" :key="item.id" :data-item-id="item.id">
+          <ShapeItem
+            :item="item"
+            :feet-per-square="feetPerSquare"
+            :grid-unit="gridUnit"
+            :graph-style="graphStyle"
+          />
+        </g>
         <ShapeItem
           v-if="drawing"
           :item="drawing"
@@ -608,9 +775,35 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             fill="#157b79"
           />
         </g>
+        <g v-if="marquee" class="selection-marquee" pointer-events="none">
+          <rect
+            :x="Math.min(marquee.start.x, marquee.current.x)"
+            :y="Math.min(marquee.start.y, marquee.current.y)"
+            :width="Math.abs(marquee.current.x - marquee.start.x)"
+            :height="Math.abs(marquee.current.y - marquee.start.y)"
+            fill="#157b7918"
+            stroke="#157b79"
+            :stroke-width="Math.max(1, radius / 4)"
+            stroke-dasharray="6 4"
+          />
+        </g>
+        <g v-if="props.selectedIds.length && tool === 'select'" class="selection-items" pointer-events="none">
+          <rect
+            v-for="box in selectedBoxes"
+            :key="`box-${box.id}`"
+            :x="box.x - 5"
+            :y="box.y - 5"
+            :width="Math.max(box.right - box.x + 10, 10)"
+            :height="Math.max(box.bottom - box.y + 10, 10)"
+            rx="6"
+            fill="#157b790f"
+            stroke="#157b7990"
+            :stroke-width="Math.max(0.8, radius / 5)"
+            stroke-dasharray="4 4"
+          />
+        </g>
       </g>
-      <g v-if="selected && tool === 'select'" class="selection-handles">
-        <!-- A dashed box makes it obvious which existing object is currently editable. -->
+      <g v-if="singleSelected && tool === 'select'" class="selection-handles">
         <rect
           v-if="selectionFrame"
           class="selection-outline"
@@ -654,7 +847,6 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             pointer-events="none"
           />
         </g>
-        <!-- Square corner handles resize the whole object, including freehand drawings. -->
         <template v-for="handle in resizeHandles" :key="`resize-${handle.key}`">
           <circle
             :data-resize="handle.key"
@@ -678,12 +870,11 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
           />
         </template>
         <template
-          v-for="(point, index) in ['freehand', 'curve'].includes(selected.type)
+          v-for="(point, index) in ['freehand', 'curve'].includes(singleSelected.type)
             ? []
-            : selected.points"
+            : singleSelected.points"
           :key="index"
         >
-          <!-- Invisible hit area stays comfortably finger-sized at every zoom level. -->
           <circle
             :data-handle="index"
             :cx="point.x"
@@ -703,6 +894,20 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             pointer-events="none"
           />
         </template>
+      </g>
+      <g v-else-if="props.selectedIds.length > 1 && tool === 'select' && groupFrame" class="selection-group-frame">
+        <rect
+          :x="groupFrame.x"
+          :y="groupFrame.y"
+          :width="groupFrame.width"
+          :height="groupFrame.height"
+          :rx="handleHitRadius / 2"
+          fill="none"
+          stroke="#157b79"
+          :stroke-width="Math.max(1, radius / 4)"
+          stroke-dasharray="8 5"
+          pointer-events="none"
+        />
       </g>
       <circle
         v-for="(point, index) in pending"
@@ -741,6 +946,26 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
       ><i></i
       ><button aria-label="Fit graph" title="Fit graph" @click="fit">
         <Maximize :size="17" />
+      </button>
+    </div>
+    <div class="mobile-graph-dock">
+      <button
+        class="mobile-dock-button"
+        :class="{ active: quickPan || tool === 'pan' }"
+        :aria-pressed="quickPan || tool === 'pan'"
+        :title="quickPan || tool === 'pan' ? 'Return to drawing' : 'Temporarily pan the graph'"
+        @click="tool === 'pan' ? emit('select-tool', 'select') : toggleQuickPan()"
+      >
+        <Hand :size="18" />
+        <span>{{ quickPan || tool === 'pan' ? 'Pan on' : 'Pan' }}</span>
+      </button>
+      <button class="mobile-dock-button" :class="{ active: tool === 'select' && !quickPan }" @click="switchToSelect">
+        <MousePointer2 :size="18" />
+        <span>Select</span>
+      </button>
+      <button class="mobile-dock-button" @click="fit">
+        <Maximize :size="18" />
+        <span>Fit</span>
       </button>
     </div>
     <p class="canvas-hint">{{ hint }}</p>
