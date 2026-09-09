@@ -4,7 +4,7 @@ import { primitives, svgPath } from "../lib/geometry.js";
 
 const props = defineProps({
   item: Object,
-  feetPerSquare: { type: Number, default: 2 },
+  feetPerSquare: { type: Number, default: 1 },
   gridUnit: { type: String, default: "ft" },
   graphStyle: { type: Object, default: () => ({}) },
 });

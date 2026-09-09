@@ -1,8 +1,19 @@
 import { DEFAULT_GRAPH_STYLE, GRID } from "./model.js";
 
 export const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+
+// Keep snapping accurate in real-world units instead of forcing every point to a full grid square.
+// Example: at 2 ft per square, one foot is half a square, so the snap step is 5 drawing units.
+export function snapStepForScale(unitsPerSquare = 1) {
+  const scale = Number(unitsPerSquare);
+  if (!Number.isFinite(scale) || scale <= 0) return GRID.step;
+  return GRID.step / Math.max(1, scale);
+}
+
 export function constrained(point, snap = false) {
-  const step = snap ? GRID.step : 0.1;
+  // A numeric snap value is treated as an explicit drawing-unit increment. Boolean true
+  // keeps the legacy full-square behavior for callers that do not provide a scale.
+  const step = typeof snap === "number" ? Math.max(0.1, snap) : snap ? GRID.step : 0.1;
   return {
     x: clamp(Math.round(point.x / step) * step, 0, GRID.width),
     y: clamp(Math.round(point.y / step) * step, 0, GRID.height),
@@ -137,7 +148,7 @@ function addPattern(result, item, polygon) {
 
 function measurementText(result, item, points, closed, options) {
   const {
-    feetPerSquare = 2,
+    feetPerSquare = 1,
     gridUnit = "ft",
     graphStyle = DEFAULT_GRAPH_STYLE,
   } = options;

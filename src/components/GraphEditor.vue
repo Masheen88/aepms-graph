@@ -10,6 +10,7 @@ import {
   clamp,
   bounds,
   rotatePoint,
+  snapStepForScale,
 } from "../lib/geometry.js";
 
 const props = defineProps({
@@ -20,7 +21,7 @@ const props = defineProps({
   selectedIds: { type: Array, default: () => [] },
   snap: Boolean,
   scaleLabel: String,
-  feetPerSquare: { type: Number, default: 2 },
+  feetPerSquare: { type: Number, default: 1 },
   gridUnit: { type: String, default: "ft" },
   graphStyle: { type: Object, default: () => ({}) },
   lineAutoConnect: { type: Boolean, default: true },
@@ -49,6 +50,8 @@ const singleSelected = computed(() =>
   selectedItems.value.length === 1 ? selectedItems.value[0] : null,
 );
 const zoom = computed(() => Math.round((870 / view.value.w) * 100));
+const snapStep = computed(() => snapStepForScale(props.feetPerSquare));
+const showSnapSubdivision = computed(() => snapStep.value < GRID.step - 0.001);
 const pointers = new Map();
 let action = null,
   gesture = null,
@@ -152,10 +155,8 @@ function screenPoint(event) {
     : { x: 0, y: 0 };
 }
 function gridPoint(event) {
-  return constrained(
-    screenPoint(event),
-    props.snap && !["freehand", "curve"].includes(props.tool),
-  );
+  const shouldSnap = props.snap && !["freehand", "curve"].includes(props.tool);
+  return constrained(screenPoint(event), shouldSnap ? snapStep.value : false);
 }
 function rawGridPoint(event) {
   return constrained(screenPoint(event), false);
@@ -673,6 +674,20 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
     >
       <defs>
         <pattern
+          id="snap-grid"
+          :width="snapStep"
+          :height="snapStep"
+          patternUnits="userSpaceOnUse"
+        >
+          <path
+            :d="`M ${snapStep} 0 L 0 0 0 ${snapStep}`"
+            fill="none"
+            :stroke="graphStyle.minor || '#dce4e7'"
+            stroke-width="0.35"
+            stroke-opacity="0.45"
+          />
+        </pattern>
+        <pattern
           id="minor-grid"
           width="10"
           height="10"
@@ -712,6 +727,13 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
         :stroke="graphStyle.major || '#ccd7db'"
         stroke-width="1"
       />
+      <rect
+        v-if="showSnapSubdivision"
+        :width="GRID.width"
+        :height="GRID.height"
+        fill="url(#snap-grid)"
+        pointer-events="none"
+      />
       <rect :width="GRID.width" :height="GRID.height" fill="url(#major-grid)" />
       <g class="ruler-numbers" aria-hidden="true">
         <text
@@ -721,7 +743,7 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
           y="-14"
           text-anchor="middle"
         >
-          {{ (n - 1) * 10 }}
+          {{ Number(((n - 1) * 10 * feetPerSquare).toFixed(1)) }}
         </text>
         <text
           v-for="n in 9"
@@ -730,7 +752,7 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
           :y="(n - 1) * 100 + 4"
           text-anchor="end"
         >
-          {{ (n - 1) * 10 }}
+          {{ Number(((n - 1) * 10 * feetPerSquare).toFixed(1)) }}
         </text>
       </g>
       <g clip-path="url(#paper-clip)">

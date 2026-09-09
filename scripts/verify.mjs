@@ -8,8 +8,15 @@ import {
   reportSchema,
   statementErrors,
   clone,
+  blankReport,
 } from "../src/lib/model.js";
-import { primitives, resizePoints, translatePoints } from "../src/lib/geometry.js";
+import {
+  constrained,
+  primitives,
+  resizePoints,
+  snapStepForScale,
+  translatePoints,
+} from "../src/lib/geometry.js";
 import { createFormPdf } from "../src/lib/pdf.js";
 import { handleApi } from "../server/api.js";
 import { localDatabase } from "../server/local.js";
@@ -39,6 +46,14 @@ report.control = {
   signature: [],
 };
 assert.equal(statementErrors(report).length, 0);
+assert.equal(blankReport().feetPerSquare, 1, "New inspections must default to 1 unit per square");
+assert.equal(snapStepForScale(1), 10, "1 ft/square snaps to full grid squares");
+assert.equal(snapStepForScale(2), 5, "2 ft/square must expose the halfway 1 ft snap point");
+assert.deepEqual(
+  constrained({ x: 13, y: 17 }, snapStepForScale(2)),
+  { x: 15, y: 15 },
+  "2 ft/square snapping must round to 1 ft half-square increments",
+);
 const invalid = clone(report);
 invalid.items[0].points[0].x = -1;
 assert.equal(reportSchema.safeParse(invalid).success, false);
@@ -211,5 +226,5 @@ assert.equal(
   1950,
 );
 console.log(
-  "PASS: validation, resizing, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
+  "PASS: validation, 1-unit default scale, scale-aware 1-unit snapping, resizing, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
 );

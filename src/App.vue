@@ -147,6 +147,15 @@ const selectedSupportsClosedShape = computed(() =>
 const selectedSupportsRotation = computed(() =>
   selected.value?.points?.length === 1 && ["label", "symbol"].includes(selected.value?.type),
 );
+const snapDistance = computed(() => {
+  const scale = Number(report.value.feetPerSquare) || 1;
+  return Math.min(1, Math.max(0.1, scale));
+});
+const snapLabel = computed(() => `${Number(snapDistance.value.toFixed(2))} ${report.value.gridUnit}`);
+const formatDistance = (worldValue) => {
+  const scaled = (worldValue / GRID.step) * (Number(report.value.feetPerSquare) || 1);
+  return Number(scaled.toFixed(2));
+};
 const symbols = computed(() => [...SYMBOLS, ...report.value.customSymbols]);
 const exportErrors = computed(() => statementErrors(report.value));
 const history = ref([JSON.stringify(report.value)]),
@@ -276,13 +285,15 @@ function patchSelected(field, value) {
   if (selected.value) selected.value[field] = value;
 }
 function patchSelectedPoint(axis, value) {
-  // Single-point marks can be corrected precisely in grid-square coordinates.
+  // Position inputs use the selected report's real-world unit so a 2 ft/square graph
+  // can still be corrected to exact 1 ft locations instead of square coordinates.
   if (!selected.value || selected.value.points.length !== 1) return;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return;
+  const scale = Number(report.value.feetPerSquare) || 1;
   const limit = axis === "x" ? GRID.width : GRID.height;
   const point = { ...selected.value.points[0] };
-  point[axis] = Math.max(0, Math.min(limit, numeric * GRID.step));
+  point[axis] = Math.max(0, Math.min(limit, (numeric / scale) * GRID.step));
   selected.value.points = [point];
   recordHistory();
 }
@@ -862,7 +873,7 @@ onBeforeUnmount(() => {
           </button>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
-              >Snap to grid</span
+              >Snap every {{ snapLabel }}</span
             ></label
           ><button
             class="icon-button mobile-panel-toggle"
@@ -898,8 +909,8 @@ onBeforeUnmount(() => {
           ><span v-if="selectedCount" class="coordinate-readout"
             >Selected {{ selectedCount }}</span
           ><span class="coordinate-readout"
-            >X {{ Math.round(position.x / 10) }} · Y
-            {{ Math.round(position.y / 10) }}</span
+            >X {{ formatDistance(position.x) }} {{ report.gridUnit }} · Y
+            {{ formatDistance(position.y) }} {{ report.gridUnit }}</span
           ><button class="text-button" @click="newReport(true)">
             Try an example <ArrowRight :size="14" />
           </button>
@@ -1094,23 +1105,23 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="selected.points.length === 1" class="field-pair">
               <label class="field"
-                ><span>X position</span
+                ><span>X position ({{ report.gridUnit }})</span
                 ><input
                   type="number"
                   min="0"
-                  :max="GRID.width / GRID.step"
-                  step="0.1"
-                  :value="selected.points[0].x / GRID.step"
+                  :max="(GRID.width / GRID.step) * report.feetPerSquare"
+                  :step="snapDistance"
+                  :value="formatDistance(selected.points[0].x)"
                   @change="patchSelectedPoint('x', $event.target.value)"
               /></label>
               <label class="field"
-                ><span>Y position</span
+                ><span>Y position ({{ report.gridUnit }})</span
                 ><input
                   type="number"
                   min="0"
-                  :max="GRID.height / GRID.step"
-                  step="0.1"
-                  :value="selected.points[0].y / GRID.step"
+                  :max="(GRID.height / GRID.step) * report.feetPerSquare"
+                  :step="snapDistance"
+                  :value="formatDistance(selected.points[0].y)"
                   @change="patchSelectedPoint('y', $event.target.value)"
               /></label>
             </div>
@@ -1379,6 +1390,7 @@ onBeforeUnmount(() => {
                 <option value="m">meters</option>
               </select>
             </div>
+            <small class="scale-help">Snap stays accurate to {{ snapLabel }} increments. Example: 2 ft per square adds a snap point halfway through each square.</small>
           </div>
         </div>
       </section>

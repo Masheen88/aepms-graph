@@ -109,3 +109,7 @@ Limits: 400 graph objects, 40,000 total drawing points, 30 custom symbols, 4,000
 - [Pointer events for mouse, pen, and touch](https://developer.mozilla.org/en-US/docs/Web/API/Pointer_events)
 
 The form was supplied by the user. Font redistribution terms are included in `public/FONT-LICENSE.txt`; dependencies retain their respective licenses.
+
+## Scale-aware snapping
+
+New inspections default to **1 ft per grid square**. Snapping is based on real-world distance rather than forcing points to full squares. For example, if the graph scale is set to **2 ft per square**, Snap uses **1 ft** increments and exposes a lighter halfway subdivision inside each square. The editor ruler, coordinate readout, and single-point X/Y position fields also use the selected report unit/scale.

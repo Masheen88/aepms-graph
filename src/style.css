@@ -1080,7 +1080,7 @@ a {
 .scale-field {
   border-left: 1px solid var(--line);
   padding-left: 28px;
-  width: 200px;
+  width: 250px;
   flex-shrink: 0;
 }
 .scale-field > span {
@@ -1097,6 +1097,13 @@ a {
 }
 .scale-field select {
   padding-left: 8px;
+}
+.scale-help {
+  display: block;
+  margin-top: 8px;
+  color: #819298;
+  font-size: 0.69rem;
+  line-height: 1.45;
 }
 .statement-grid {
   display: grid;

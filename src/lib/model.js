@@ -190,7 +190,7 @@ export function blankReport() {
     street: "",
     city: "",
     construction: [],
-    feetPerSquare: 2,
+    feetPerSquare: 1,
     gridUnit: "ft",
     graphStyle: { ...DEFAULT_GRAPH_STYLE },
     items: [],
