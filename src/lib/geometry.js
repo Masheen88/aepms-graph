@@ -56,6 +56,24 @@ export function resizePoints(points, corner, target, minimum = 5) {
   }));
 }
 
+export function rotatePoint(point, center, degrees) {
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  };
+}
+
+function rotatedShape(center, points, degrees = 0) {
+  return points.map((point) =>
+    rotatePoint({ x: center.x + point.x, y: center.y + point.y }, center, degrees),
+  );
+}
+
 function polygonFor(item) {
   if (item.type === "rect") {
     const b = bounds(item);
@@ -66,7 +84,7 @@ function polygonFor(item) {
       { x: b.x, y: b.bottom },
     ];
   }
-  return item.type === "outline" && item.closed ? item.points : [];
+  return item.closed && ["outline", "curve", "freehand"].includes(item.type) ? item.points : [];
 }
 
 function hatchSegments(polygon, a, b, spacing) {
@@ -117,13 +135,13 @@ function addPattern(result, item, polygon) {
   if (item.pattern === "crosshatch") add(hatchSegments(polygon, 1, -1, spacing));
 }
 
-function measurementText(result, points, closed, options) {
+function measurementText(result, item, points, closed, options) {
   const {
     feetPerSquare = 2,
     gridUnit = "ft",
     graphStyle = DEFAULT_GRAPH_STYLE,
   } = options;
-  if (!graphStyle.showMeasurements || points.length < 2) return;
+  if (!graphStyle.showMeasurements || item.showMeasurements === false || points.length < 2) return;
   const segments = points.slice(0, -1).map((point, i) => [point, points[i + 1]]);
   if (closed) segments.push([points.at(-1), points[0]]);
   for (const [a, b] of segments) {
@@ -157,9 +175,9 @@ export function primitives(item, options = {}) {
   // text labels remain visible because their text is the mark itself.
   const showGeometryLabel = item.showLabel !== false;
   const result = [];
-  const path = (points, closed = false) =>
-    result.push({ kind: "path", points, closed, color, width });
-  const text = (value, x, y, size = fontSize) => {
+  const path = (points, closed = false, smooth = false) =>
+    result.push({ kind: "path", points, closed, color, width, smooth });
+  const text = (value, x, y, size = fontSize, rotate = 0) => {
     if (value)
       result.push({
         kind: "text",
@@ -170,6 +188,7 @@ export function primitives(item, options = {}) {
         color,
         anchor: "middle",
         halo: true,
+        rotate,
       });
   };
   if (item.type === "rect") {
@@ -177,44 +196,113 @@ export function primitives(item, options = {}) {
       b = bounds(item);
     addPattern(result, item, polygon);
     path(polygon, true);
-    measurementText(result, polygon, true, options);
+    measurementText(result, item, polygon, true, options);
     if (showGeometryLabel)
       text(item.text, (b.x + b.right) / 2, (b.y + b.bottom) / 2);
-  } else if (["outline", "line", "freehand"].includes(item.type)) {
+  } else if (["outline", "line", "freehand", "curve"].includes(item.type)) {
     const polygon = polygonFor(item);
     addPattern(result, item, polygon);
-    path(p, item.closed);
-    if (item.type !== "freehand") measurementText(result, p, item.closed, options);
+    path(p, item.closed, item.type === "curve");
+    if (["outline", "line", "curve"].includes(item.type))
+      measurementText(result, item, p, item.closed, options);
     const b = bounds(item);
     if (showGeometryLabel)
       text(item.text, (b.x + b.right) / 2, (b.y + b.bottom) / 2);
   } else if (item.type === "symbol" && item.symbol === "door") {
     const { x, y } = p[0];
     // Crawlspace access is rendered as a simple, familiar Z-like field mark.
-    path([
-      { x: x - 13, y: y - 11 },
-      { x: x + 13, y: y - 11 },
-      { x: x - 13, y: y + 11 },
-      { x: x + 13, y: y + 11 },
-    ]);
+    path(
+      rotatedShape(
+        { x, y },
+        [
+          { x: -13, y: -11 },
+          { x: 13, y: -11 },
+          { x: -13, y: 11 },
+          { x: 13, y: 11 },
+        ],
+        item.rotation || 0,
+      ),
+    );
+  } else if (item.type === "symbol" && item.symbol === "steps") {
+    const { x, y } = p[0];
+    // A compact stair-step glyph provides a fast way to mark steps or stairs.
+    path(
+      rotatedShape(
+        { x, y },
+        [
+          { x: -14, y: 12 },
+          { x: -14, y: -12 },
+          { x: -7, y: -12 },
+          { x: -7, y: -4 },
+          { x: 0, y: -4 },
+          { x: 0, y: 4 },
+          { x: 7, y: 4 },
+          { x: 7, y: 12 },
+          { x: 14, y: 12 },
+        ],
+        item.rotation || 0,
+      ),
+    );
   } else if (item.type === "symbol" && item.symbol === "north") {
     const { x, y } = p[0];
-    path([
-      { x, y: y + 24 },
-      { x, y: y - 10 },
-    ]);
-    path([
-      { x: x - 7, y: y - 1 },
-      { x, y: y - 10 },
-      { x: x + 7, y: y - 1 },
-    ]);
-    text(item.text, x, y - 22, 14);
-  } else text(item.text, p[0].x, p[0].y);
+    path(
+      rotatedShape(
+        { x, y },
+        [
+          { x: 0, y: 24 },
+          { x: 0, y: -10 },
+        ],
+        item.rotation || 0,
+      ),
+    );
+    path(
+      rotatedShape(
+        { x, y },
+        [
+          { x: -7, y: -1 },
+          { x: 0, y: -10 },
+          { x: 7, y: -1 },
+        ],
+        item.rotation || 0,
+      ),
+    );
+    const northLabel = rotatePoint({ x, y: y - 22 }, { x, y }, item.rotation || 0);
+    text(item.text, northLabel.x, northLabel.y, 14, item.rotation || 0);
+  } else text(item.text, p[0].x, p[0].y, fontSize, item.rotation || 0);
   return result;
 }
+
+function smoothPath(primitive) {
+  const { points, closed } = primitive;
+  if (!points?.length) return "";
+  if (points.length < 3) {
+    return points.map((p, i) => `${i ? "L" : "M"} ${p.x} ${p.y}`).join(" ") + (closed ? " Z" : "");
+  }
+  const get = (index) => {
+    if (closed) return points[(index + points.length) % points.length];
+    return points[clamp(index, 0, points.length - 1)];
+  };
+  let d = `M ${points[0].x} ${points[0].y}`;
+  const end = closed ? points.length : points.length - 1;
+  for (let i = 0; i < end; i++) {
+    const p0 = get(i - 1),
+      p1 = get(i),
+      p2 = get(i + 1),
+      p3 = get(i + 2);
+    const c1x = p1.x + (p2.x - p0.x) / 6,
+      c1y = p1.y + (p2.y - p0.y) / 6,
+      c2x = p2.x - (p3.x - p1.x) / 6,
+      c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
+  }
+  return closed ? `${d} Z` : d;
+}
+
 export const svgPath = (primitive) =>
-  primitive.points.map((p, i) => `${i ? "L" : "M"} ${p.x} ${p.y}`).join(" ") +
-  (primitive.closed ? " Z" : "");
+  primitive.smooth
+    ? smoothPath(primitive)
+    : primitive.points.map((p, i) => `${i ? "L" : "M"} ${p.x} ${p.y}`).join(" ") +
+      (primitive.closed ? " Z" : "");
 
 // The clean printed form uses a true rectangular registration. Unlike the old scan,
 // this mapping is uniform, so exported geometry has the same proportions as the editor.

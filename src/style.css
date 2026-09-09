@@ -389,6 +389,7 @@ a {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
   min-height: 56px;
   padding: 8px 23px;
@@ -414,6 +415,40 @@ a {
 .snap-toggle input {
   width: 14px;
   height: 14px;
+}
+.line-tool-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+.compact-toggle {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #d9e4e6;
+  border-radius: 999px;
+  background: white;
+}
+.text-button.compact {
+  min-height: 34px;
+  padding: 0 4px;
+  font-size: 0.78rem;
+}
+.btn-mini {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+.mini-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.quick-rotate-field {
+  justify-content: flex-end;
+}
+.quick-rotate-field > span {
+  display: block;
 }
 
 /* Small status badge clarifies that Line intentionally remains active after placement. */
@@ -1478,6 +1513,13 @@ kbd {
 
 /* The same drawing surface adapts to tablet and phone, with touch-sized controls. */
 
+.theme-dark .line-tool-controls .compact-toggle {
+  background: #18272c;
+  border-color: #314247;
+}
+.theme-dark .text-button.compact:hover {
+  color: #dff5ef;
+}
 .theme-dark .repeat-tool-badge,
 .theme-dark .setting-toggle,
 .theme-dark .edit-object-callout {
@@ -2412,6 +2454,11 @@ kbd {
 }
 
 @media (max-width: 640px) {
+  .line-tool-controls {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
+  }
   .repeat-tool-badge {
     display: none;
   }

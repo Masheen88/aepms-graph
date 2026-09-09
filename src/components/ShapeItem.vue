@@ -57,6 +57,7 @@ const marks = computed(() =>
         :fill="p.color"
         text-anchor="middle"
         dominant-baseline="central"
+        :transform="p.rotate ? `rotate(${p.rotate} ${p.x} ${p.y})` : undefined"
         :stroke="p.halo ? graphStyle.background || '#fffef8' : 'none'"
         :stroke-width="p.halo ? 5 : 0"
         stroke-linejoin="round"

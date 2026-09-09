@@ -72,7 +72,8 @@ const tab = ref("graph"),
   tool = ref("outline"),
   selectedId = ref(null),
   snap = ref(true),
-  panelOpen = ref(false);
+  panelOpen = ref(false),
+  lineAutoConnect = ref(true);
 const graph = ref(null),
   fileInput = ref(null),
   labelInput = ref(null),
@@ -99,6 +100,7 @@ const selectedTitle = computed(() => {
     rect: "Area / rectangle",
     outline: "Structure outline",
     line: "Line",
+    curve: "Curved path",
     freehand: "Freehand drawing",
     label: "Text label",
     symbol: "Inspection mark",
@@ -106,7 +108,20 @@ const selectedTitle = computed(() => {
   return selected.value ? names[selected.value.type] || "Selected object" : "Selected object";
 });
 const selectedHasOptionalLabel = computed(() =>
-  ["rect", "outline", "line", "freehand"].includes(selected.value?.type),
+  ["rect", "outline", "line", "curve", "freehand"].includes(selected.value?.type),
+);
+const selectedSupportsPattern = computed(() =>
+  selected.value?.type === "rect" ||
+  (selected.value?.closed && ["outline", "curve", "freehand"].includes(selected.value?.type)),
+);
+const selectedSupportsMeasurement = computed(() =>
+  ["rect", "outline", "line", "curve"].includes(selected.value?.type),
+);
+const selectedSupportsClosedShape = computed(() =>
+  ["outline", "curve", "freehand"].includes(selected.value?.type),
+);
+const selectedSupportsRotation = computed(() =>
+  selected.value?.points?.length === 1 && ["label", "symbol"].includes(selected.value?.type),
 );
 const symbols = computed(() => [...SYMBOLS, ...report.value.customSymbols]);
 const exportErrors = computed(() => statementErrors(report.value));
@@ -120,6 +135,7 @@ const tools = [
   { id: "rect", label: "Room", icon: Square, key: "R" },
   { id: "hatch", label: "Hatch area", icon: Grid2X2, key: "A" },
   { id: "line", label: "Line", icon: MoveUpRight, key: "L" },
+  { id: "curve", label: "Curve", icon: Pencil, key: "C" },
   { id: "freehand", label: "Draw", icon: Pencil, key: "B" },
   { id: "label", label: "Label", icon: Type, key: "T" },
   { id: "point", label: "Point", icon: Circle, key: "P" },
@@ -178,6 +194,36 @@ function toggleTheme() {
 }
 function resetGraphStyle() {
   report.value.graphStyle = { ...DEFAULT_GRAPH_STYLE };
+  recordHistory();
+}
+function setLineAutoConnect(value) {
+  lineAutoConnect.value = value;
+  try {
+    localStorage.setItem("tf-line-auto-connect", value ? "1" : "0");
+  } catch {
+    /* Browser storage may be disabled; the drawing session still works. */
+  }
+}
+function breakLineChain() {
+  graph.value?.clearLineAnchor();
+  notify("Next line starts fresh.");
+}
+function rotateSelected(delta) {
+  if (!selected.value) return;
+  const base = Number(selected.value.rotation || 0);
+  let next = base + delta;
+  while (next > 180) next -= 360;
+  while (next < -180) next += 360;
+  selected.value.rotation = next;
+  recordHistory();
+}
+function patchSelectedRotation(value) {
+  if (!selected.value) return;
+  let next = Number(value);
+  if (!Number.isFinite(next)) return;
+  while (next > 180) next -= 360;
+  while (next < -180) next += 360;
+  selected.value.rotation = next;
   recordHistory();
 }
 function selectSymbol(symbol) {
@@ -563,6 +609,7 @@ onMounted(() => {
     darkMode.value = savedTheme
       ? savedTheme === "dark"
       : globalThis.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
+    lineAutoConnect.value = localStorage.getItem("tf-line-auto-connect") !== "0";
     const drafts = Object.keys(localStorage)
       .filter((k) => k.startsWith("tf-draft:"))
       .flatMap((k) => {
@@ -749,6 +796,17 @@ onBeforeUnmount(() => {
                     : tools.find((t) => t.id === tool)?.label
             }}</span>
             <span v-if="tool === 'line'" class="repeat-tool-badge">REPEAT · ESC TO FINISH</span>
+            <span v-if="tool === 'curve'" class="repeat-tool-badge">DRAW CURVES · EDIT TO CLOSE / HATCH</span>
+          </div>
+          <div v-if="tool === 'line'" class="line-tool-controls">
+            <label class="snap-toggle compact-toggle">
+              <input
+                :checked="lineAutoConnect"
+                type="checkbox"
+                @change="setLineAutoConnect($event.target.checked)"
+              /><span>Auto-connect</span>
+            </label>
+            <button class="text-button compact" @click="breakLineChain">Break chain</button>
           </div>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
@@ -774,6 +832,7 @@ onBeforeUnmount(() => {
           :feet-per-square="report.feetPerSquare"
           :grid-unit="report.gridUnit"
           :graph-style="report.graphStyle"
+          :line-auto-connect="lineAutoConnect"
           @change="changeItems"
           @select-tool="setTool"
           @position="position = $event"
@@ -899,8 +958,57 @@ onBeforeUnmount(() => {
                   <Check v-if="selected.color === color" :size="17" />
                 </button></div
             ></label>
+            <label v-if="selectedSupportsClosedShape" class="setting-toggle object-label-toggle">
+              <span>
+                <strong>Closed shape</strong>
+                <small>Close the path so curved walkways or outlines can be hatched and measured around the full boundary.</small>
+              </span>
+              <input
+                type="checkbox"
+                :checked="selected.closed"
+                :disabled="selected.points.length < 3"
+                @change="
+                  patchSelected('closed', $event.target.checked);
+                  if (!$event.target.checked) patchSelected('pattern', 'none');
+                  recordHistory();
+                "
+              />
+            </label>
+            <label v-if="selectedSupportsMeasurement" class="setting-toggle object-label-toggle">
+              <span>
+                <strong>Show measurements for this object</strong>
+                <small>Turn lengths on or off without affecting other shapes.</small>
+              </span>
+              <input
+                type="checkbox"
+                :checked="selected.showMeasurements !== false"
+                @change="
+                  patchSelected('showMeasurements', $event.target.checked);
+                  recordHistory();
+                "
+              />
+            </label>
+            <div v-if="selectedSupportsRotation" class="field-pair">
+              <label class="field"
+                ><span>Rotation</span
+                ><input
+                  type="number"
+                  min="-180"
+                  max="180"
+                  step="1"
+                  :value="selected.rotation || 0"
+                  @change="patchSelectedRotation($event.target.value)"
+              /></label>
+              <div class="field quick-rotate-field">
+                <span>Quick rotate</span>
+                <div class="mini-actions">
+                  <button class="btn btn-secondary btn-mini" @click="rotateSelected(-15)">-15°</button>
+                  <button class="btn btn-secondary btn-mini" @click="rotateSelected(15)">+15°</button>
+                </div>
+              </div>
+            </div>
             <div
-              v-if="selected.type === 'rect' || (selected.type === 'outline' && selected.closed)"
+              v-if="selectedSupportsPattern"
               class="field-pair"
             >
               <label class="field"
@@ -962,8 +1070,9 @@ onBeforeUnmount(() => {
             <p class="small-help">
               In Select mode, drag the object to move it. Round handles edit
               individual points; square corner handles resize the whole object,
-              including freehand drawings. Arrow keys nudge by 1 px; hold Shift
-              to nudge by 10 px.
+              including freehand drawings; the green rotate handle turns single-point
+              symbols and labels. Arrow keys nudge by 1 px; hold Shift to nudge
+              by 10 px. Hold Shift while rotating for free-angle rotation.
             </p>
             <div class="flex gap-2">
               <button
@@ -1020,6 +1129,10 @@ onBeforeUnmount(() => {
             >
               <span class="door-symbol">Z</span> Crawlspace door</button
             ><button
+              @click="selectSymbol(SYMBOLS.find((s) => s.key === 'steps'))"
+            >
+              ST Steps / stair</button
+            ><button
               @click="
                 setTool('label');
                 panelOpen = false;
@@ -1037,7 +1150,7 @@ onBeforeUnmount(() => {
           <div class="symbol-list">
             <button
               v-for="symbol in symbols.filter(
-                (s) => !['door', 'north'].includes(s.key),
+                (s) => !['door', 'north', 'steps'].includes(s.key),
               )"
               :key="symbol.key"
               :class="{
@@ -1069,7 +1182,7 @@ onBeforeUnmount(() => {
           </div>
           <label class="checkbox-field measurement-toggle">
             <input v-model="report.graphStyle.showMeasurements" type="checkbox" @change="recordHistory" />
-            Show length on structural lines
+            Show measurements by default
           </label>
           <label class="field">
             <span>Measurement font size</span>
@@ -1457,9 +1570,21 @@ onBeforeUnmount(() => {
           the outline.
         </p>
         <p>
-          <strong>Move and reshape</strong>Choose Select. Drag a mark to move
-          it, or drag its round handles to reposition individual points. Arrow
-          keys nudge the selected object.
+          <strong>Curved walkways and steps</strong>Use Curve to sketch a curved
+          path, then turn on Closed shape and Diagonal marks if it should become
+          a walkway or slab. Use the Steps / stair symbol for stair runs.
+        </p>
+        <p>
+          <strong>Move, reshape, and rotate</strong>Choose Select. Drag a mark
+          to move it, drag its round handles to reposition individual points,
+          drag the square handles to resize, and drag the green rotate handle on
+          single-point labels or symbols to turn them. Arrow keys nudge the
+          selected object.
+        </p>
+        <p>
+          <strong>Repeated lines</strong>Line stays active so you can trace wall
+          runs quickly. Auto-connect continues from the previous endpoint, and
+          Break chain starts the next segment fresh.
         </p>
         <p>
           <strong>Zoom and pan</strong>Scroll or pinch with two fingers to zoom.
@@ -1472,10 +1597,12 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="shortcut-grid">
-        <span>Undo <kbd>Ctrl / ⌘ Z</kbd></span
-        ><span>Save <kbd>Ctrl / ⌘ S</kbd></span
-        ><span>Finish outline <kbd>Enter</kbd></span
-        ><span>Cancel outline <kbd>Esc</kbd></span>
+        <span>Undo <kbd>Ctrl / ⌘ Z</kbd></span>
+        <span>Save <kbd>Ctrl / ⌘ S</kbd></span>
+        <span>Finish outline <kbd>Enter</kbd></span>
+        <span>Cancel / stop line <kbd>Esc</kbd></span>
+        <span>Select tool <kbd>V</kbd></span>
+        <span>Curve tool <kbd>C</kbd></span>
       </div>
       <button class="btn btn-primary w-full mt-5" @click="modal = null">
         Back to the graph

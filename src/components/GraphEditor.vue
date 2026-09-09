@@ -9,6 +9,7 @@ import {
   resizePoints,
   clamp,
   bounds,
+  rotatePoint,
 } from "../lib/geometry.js";
 
 const props = defineProps({
@@ -21,6 +22,7 @@ const props = defineProps({
   feetPerSquare: { type: Number, default: 2 },
   gridUnit: { type: String, default: "ft" },
   graphStyle: { type: Object, default: () => ({}) },
+  lineAutoConnect: { type: Boolean, default: true },
 });
 const emit = defineEmits([
   "update:items",
@@ -32,7 +34,8 @@ const emit = defineEmits([
 const svg = ref(null),
   view = ref({ x: -35, y: -35, w: 870, h: 890 }),
   drawing = ref(null),
-  pending = ref([]);
+  pending = ref([]),
+  lineAnchor = ref(null);
 const selected = computed(() =>
   props.items.find((i) => i.id === props.selectedId),
 );
@@ -73,18 +76,41 @@ const selectionFrame = computed(() => {
     height: height + pad * 2,
   };
 });
+const rotateHandle = computed(() => {
+  if (
+    !selected.value ||
+    props.tool !== "select" ||
+    selected.value.points.length !== 1 ||
+    !["symbol", "label"].includes(selected.value.type)
+  )
+    return null;
+  const center = selected.value.points[0];
+  const handle = rotatePoint(
+    { x: center.x, y: center.y - handleHitRadius.value * 2.6 },
+    center,
+    selected.value.rotation || 0,
+  );
+  return { ...handle, center };
+});
+const lineChainMarker = computed(() =>
+  props.tool === "line" && props.lineAutoConnect && lineAnchor.value
+    ? lineAnchor.value
+    : null,
+);
 const hint = computed(
   () =>
     ({
       select:
-        "Select a mark to move it. Drag the round handles to edit its points.",
+        "Select a mark to move it. Drag the round handles to edit its points, the square handles to resize, or the rotate handle for symbols and labels.",
       outline:
         "Tap to add corners. Tap the first corner or choose Finish to close.",
       rect: "Drag from one corner to the opposite corner.",
       hatch: "Drag an area, then edit the label or pattern from the object panel.",
       garage: "Drag to place a garage.",
       crawlspace: "Drag to place a crawlspace.",
-      line: "Drag to draw a line. Line stays active for the next segment; press V or Esc when finished.",
+      line: "Drag to draw a line. Line stays active for the next segment; auto-connect can continue from the previous endpoint. Press V or Esc when finished.",
+      curve:
+        "Drag to draw a curved path. Turn on Closed shape and Diagonal marks afterwards for curved walkways or beds.",
       freehand: "Draw with your finger, pen, or mouse.",
       label: "Tap the grid to place a label.",
       point: "Tap to add a point.",
@@ -104,7 +130,7 @@ function screenPoint(event) {
 function gridPoint(event) {
   return constrained(
     screenPoint(event),
-    props.snap && props.tool !== "freehand",
+    props.snap && !["freehand", "curve"].includes(props.tool),
   );
 }
 function updateItems(items) {
@@ -115,6 +141,9 @@ function commit(items) {
 }
 function fit() {
   view.value = { x: -35, y: -35, w: 870, h: 890 };
+}
+function clearLineAnchor() {
+  lineAnchor.value = null;
 }
 function zoomAt(
   factor,
@@ -188,21 +217,28 @@ function pointerDown(event) {
     return;
   }
   if (props.tool === "select") {
+    const rotate = event.target.closest("[data-rotate]");
     const resize = event.target.closest("[data-resize]");
     const handle = event.target.closest("[data-handle]");
-    const id = resize || handle
+    const id = rotate || resize || handle
       ? props.selectedId
       : event.target.closest("[data-item-id]")?.dataset.itemId;
     emit("update:selectedId", id || null);
     if (id) {
       before = clone(props.items);
+      const original = clone(props.items.find((i) => i.id === id));
+      const box = bounds(original);
       action = {
-        kind: resize ? "resize" : handle ? "handle" : "move",
+        kind: rotate ? "rotate" : resize ? "resize" : handle ? "handle" : "move",
         id,
         index: handle ? Number(handle.dataset.handle) : null,
         corner: resize?.dataset.resize || null,
         start: p,
-        original: clone(props.items.find((i) => i.id === id)),
+        original,
+        center:
+          original.points.length === 1
+            ? original.points[0]
+            : { x: (box.x + box.right) / 2, y: (box.y + box.bottom) / 2 },
       };
     }
     return;
@@ -228,7 +264,12 @@ function pointerDown(event) {
   const type = ["garage", "crawlspace", "hatch"].includes(props.tool)
     ? "rect"
     : props.tool;
-  drawing.value = newItem(type, [p, p], {
+  const start =
+    props.tool === "line" && props.lineAutoConnect && lineAnchor.value && !event.altKey
+      ? clone(lineAnchor.value)
+      : p;
+  if (props.tool === "line" && event.altKey) clearLineAnchor();
+  drawing.value = newItem(type, [start], {
     text:
       props.tool === "garage"
         ? "Garage"
@@ -239,7 +280,9 @@ function pointerDown(event) {
             : "",
     pattern: props.tool === "hatch" ? "diagonal" : "none",
   });
-  action = { kind: "create", start: p };
+  if (["rect", "line", "garage", "crawlspace", "hatch"].includes(props.tool))
+    drawing.value.points = [start, start];
+  action = { kind: "create", start };
 }
 function pointerMove(event) {
   const p = gridPoint(event);
@@ -275,12 +318,24 @@ function pointerMove(event) {
     return;
   }
   if (action.kind === "create") {
-    if (drawing.value.type === "freehand") {
+    if (["freehand", "curve"].includes(drawing.value.type)) {
       const points = drawing.value.points,
         prev = points.at(-1);
       if (Math.hypot(p.x - prev.x, p.y - prev.y) > 0.7 && points.length < 6000)
         points.push(p);
     } else drawing.value.points = [action.start, p];
+    return;
+  }
+  if (action.kind === "rotate") {
+    let degrees = (Math.atan2(p.y - action.center.y, p.x - action.center.x) * 180) / Math.PI + 90;
+    if (!event.shiftKey) degrees = Math.round(degrees / 15) * 15;
+    if (degrees > 180) degrees -= 360;
+    if (degrees < -180) degrees += 360;
+    updateItems(
+      props.items.map((i) =>
+        i.id === action.id ? { ...i, rotation: clamp(degrees, -180, 180) } : i,
+      ),
+    );
     return;
   }
   if (action.kind === "resize") {
@@ -338,11 +393,17 @@ function pointerUp(event) {
     emit("update:selectedId", shape.id);
     emit("select-tool", "select");
   } else if (action?.kind === "create" && drawing.value) {
-    const b = bounds(drawing.value);
-    if (Math.hypot(b.right - b.x, b.bottom - b.y) > 2) {
+    const b = bounds(drawing.value),
+      validSize = Math.hypot(b.right - b.x, b.bottom - b.y) > 2,
+      validStroke = drawing.value.points.length >= 2 && validSize;
+    if (validStroke) {
       const created = clone(drawing.value);
       commit([...props.items, created]);
       emit("update:selectedId", created.id);
+      if (created.type === "line") {
+        if (props.lineAutoConnect) lineAnchor.value = clone(created.points.at(-1));
+        else clearLineAnchor();
+      }
       // Line is intentionally a repeat tool for quickly tracing walls, slabs, walkways, etc.
       // Other drag tools still enter Select so the new object can be resized or corrected immediately.
       if (created.type !== "line") emit("select-tool", "select");
@@ -369,7 +430,10 @@ function keydown(event) {
     cancel();
     emit("update:selectedId", null);
     // Repeat-line mode needs an obvious keyboard exit that does not require clicking the toolbar.
-    if (props.tool === "line") emit("select-tool", "select");
+    if (props.tool === "line") {
+      clearLineAnchor();
+      emit("select-tool", "select");
+    }
   }
   if (event.key === "Backspace" && pending.value.length) {
     event.preventDefault();
@@ -402,14 +466,21 @@ function releaseSpace() {
 }
 watch(
   () => props.tool,
-  () => {
+  (value) => {
     finishOutline(false);
     resetInteraction(true);
+    if (value !== "line") clearLineAnchor();
+  },
+);
+watch(
+  () => props.lineAutoConnect,
+  (value) => {
+    if (!value) clearLineAnchor();
   },
 );
 onMounted(() => window.addEventListener("keyup", releaseSpace));
 onBeforeUnmount(() => window.removeEventListener("keyup", releaseSpace));
-defineExpose({ fit, cancel, finishOutline });
+defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
 </script>
 
 <template>
@@ -519,6 +590,24 @@ defineExpose({ fit, cancel, finishOutline });
           stroke-width="2"
           stroke-dasharray="5 4"
         />
+        <g v-if="lineChainMarker" class="line-chain-marker" pointer-events="none">
+          <circle
+            :cx="lineChainMarker.x"
+            :cy="lineChainMarker.y"
+            :r="handleHitRadius * 0.7"
+            fill="#157b79"
+            fill-opacity="0.12"
+            stroke="#157b79"
+            :stroke-width="Math.max(1, radius / 4)"
+            stroke-dasharray="4 3"
+          />
+          <circle
+            :cx="lineChainMarker.x"
+            :cy="lineChainMarker.y"
+            :r="radius * 0.65"
+            fill="#157b79"
+          />
+        </g>
       </g>
       <g v-if="selected && tool === 'select'" class="selection-handles">
         <!-- A dashed box makes it obvious which existing object is currently editable. -->
@@ -536,6 +625,35 @@ defineExpose({ fit, cancel, finishOutline });
           stroke-dasharray="5 4"
           pointer-events="none"
         />
+        <g v-if="rotateHandle" class="selection-rotate-control">
+          <line
+            :x1="rotateHandle.center.x"
+            :y1="rotateHandle.center.y"
+            :x2="rotateHandle.x"
+            :y2="rotateHandle.y"
+            stroke="#157b79"
+            :stroke-width="Math.max(1, radius / 4)"
+            stroke-dasharray="4 3"
+            pointer-events="none"
+          />
+          <circle
+            data-rotate="1"
+            :cx="rotateHandle.x"
+            :cy="rotateHandle.y"
+            :r="handleHitRadius"
+            fill="transparent"
+            pointer-events="all"
+          />
+          <circle
+            :cx="rotateHandle.x"
+            :cy="rotateHandle.y"
+            :r="radius"
+            fill="#157b79"
+            stroke="white"
+            :stroke-width="radius / 3"
+            pointer-events="none"
+          />
+        </g>
         <!-- Square corner handles resize the whole object, including freehand drawings. -->
         <template v-for="handle in resizeHandles" :key="`resize-${handle.key}`">
           <circle
@@ -560,7 +678,7 @@ defineExpose({ fit, cancel, finishOutline });
           />
         </template>
         <template
-          v-for="(point, index) in selected.type === 'freehand'
+          v-for="(point, index) in ['freehand', 'curve'].includes(selected.type)
             ? []
             : selected.points"
           :key="index"

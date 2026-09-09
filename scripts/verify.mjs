@@ -90,6 +90,36 @@ assert.equal(
   false,
   "Hidden geometry labels must stay out of editor/preview/PDF primitives",
 );
+const hiddenMeasurements = clone(patterned);
+hiddenMeasurements.showMeasurements = false;
+const hiddenMeasurementMarks = primitives(hiddenMeasurements, {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+assert.equal(
+  hiddenMeasurementMarks.some((mark) => mark.measurement),
+  false,
+  "Per-object measurement toggles must suppress length text",
+);
+const rotatedDoor = primitives(
+  clone(report.items.find((item) => item.symbol === "door")),
+  { feetPerSquare: report.feetPerSquare, gridUnit: report.gridUnit, graphStyle: report.graphStyle },
+);
+assert.ok(
+  rotatedDoor.some((mark) => mark.kind === "path"),
+  "Rotated door symbols must still render as vector paths",
+);
+const curved = clone(report.items.find((item) => item.type === "curve"));
+const curvedMarks = primitives(curved, {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+assert.ok(
+  curvedMarks.some((mark) => mark.kind === "path" && mark.smooth),
+  "Curve objects must render as smooth paths",
+);
 
 const root = await mkdtemp(join(tmpdir(), "fieldbook-verify-"));
 let db;
@@ -181,5 +211,5 @@ assert.equal(
   1950,
 );
 console.log(
-  "PASS: validation, resizing, hidden labels, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
+  "PASS: validation, resizing, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
 );

@@ -39,6 +39,7 @@ export const SYMBOLS = [
   { key: "tubes", text: "T", title: "Termite tubes", color: "#b43b37" },
   // A compact Z-shaped mark reads more like the hand-drawn crawlspace access symbol.
   { key: "door", text: "Z", title: "Crawlspace door", color: INK },
+  { key: "steps", text: "ST", title: "Steps / stair", color: INK },
   { key: "north", text: "N", title: "North arrow", color: INK },
 ];
 
@@ -102,7 +103,7 @@ const graphStyleSchema = z
 export const itemSchema = z
   .object({
     id: z.string().uuid(),
-    type: z.enum(["outline", "line", "freehand", "rect", "label", "symbol"]),
+    type: z.enum(["outline", "line", "curve", "freehand", "rect", "label", "symbol"]),
     points: z.array(point).min(1).max(6000),
     text: z.string().max(60),
     symbol: z.string().max(40).default(""),
@@ -116,12 +117,16 @@ export const itemSchema = z
     patternSpacing: z.number().min(8).max(50).default(16),
     // Structural labels can be hidden without deleting their text, so they can be restored later.
     showLabel: z.boolean().default(true),
+    // Measurements can be turned off for a single object while remaining on elsewhere.
+    showMeasurements: z.boolean().default(true),
+    // Single-point symbols and labels can be rotated to match the graph.
+    rotation: z.number().min(-180).max(180).default(0),
   })
   .superRefine((item, ctx) => {
     const min =
       item.type === "outline" && item.closed
         ? 3
-        : ["outline", "line", "freehand", "rect"].includes(item.type)
+        : ["outline", "line", "curve", "freehand", "rect"].includes(item.type)
           ? 2
           : 1;
     if (item.points.length < min)
@@ -208,6 +213,8 @@ export function newItem(type, points, overrides = {}) {
     pattern: "none",
     patternSpacing: 16,
     showLabel: true,
+    showMeasurements: true,
+    rotation: 0,
     ...overrides,
   };
 }
@@ -280,14 +287,21 @@ export function sampleReport() {
       { text: "Crawlspace", width: 1, pattern: "diagonal" },
     ),
     newItem(
-      "rect",
+      "curve",
       [
-        { x: 280, y: 610 },
-        { x: 400, y: 660 },
+        { x: 260, y: 640 },
+        { x: 290, y: 620 },
+        { x: 345, y: 615 },
+        { x: 410, y: 635 },
+        { x: 440, y: 665 },
+        { x: 432, y: 700 },
+        { x: 360, y: 712 },
+        { x: 292, y: 692 },
       ],
-      { text: "Walkway", width: 1, pattern: "diagonal" },
+      { text: "Curved walkway", width: 1, pattern: "diagonal", closed: true, showMeasurements: false },
     ),
-    newItem("symbol", [{ x: 435, y: 540 }], { text: "Z", symbol: "door" }),
+    newItem("symbol", [{ x: 435, y: 540 }], { text: "Z", symbol: "door", rotation: 90 }),
+    newItem("symbol", [{ x: 250, y: 610 }], { text: "ST", symbol: "steps", rotation: 90 }),
     newItem("symbol", [{ x: 200, y: 260 }], {
       text: "XXX",
       symbol: "termites",
@@ -303,7 +317,7 @@ export function sampleReport() {
       text: "EXAMPLE · REPLACE BEFORE USE",
       fontSize: 16,
     }),
-    newItem("label", [{ x: 340, y: 710 }], {
+    newItem("label", [{ x: 340, y: 740 }], {
       text: "FRONT / STREET",
       fontSize: 12,
     }),

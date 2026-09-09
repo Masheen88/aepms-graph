@@ -60,6 +60,7 @@ defineProps({ pages: Array });
               :font-weight="mark.bold ? 700 : 400"
               :text-anchor="mark.anchor"
               :dominant-baseline="mark.anchor === 'middle' ? 'central' : 'auto'"
+              :transform="mark.rotate ? `rotate(${mark.rotate} ${mark.x} ${mark.y})` : undefined"
               :fill="mark.color"
               :stroke="mark.halo ? mark.haloColor || 'white' : 'none'"
               :stroke-width="mark.halo ? 8 : 0"

@@ -8,6 +8,7 @@ import {
   closePath,
   clip,
   endPath,
+  degrees,
 } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import {
@@ -502,6 +503,7 @@ export async function createFormPdf(
           size: mark.size,
           font,
           color: color(mark.color),
+          rotate: mark.rotate ? degrees(mark.rotate) : undefined,
         });
       }
       if (mark.graph) page.pushOperators(popGraphicsState());
