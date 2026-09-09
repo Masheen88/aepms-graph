@@ -1,0 +1,255 @@
+{
+  "application": "Termite Fieldbook",
+  "report": {
+    "schemaVersion": 1,
+    "id": "7dc40bfb-65f5-47fa-8f32-cc55bfc20b20",
+    "title": "Example inspection",
+    "customer": "Updated sample property",
+    "phone": "615-555-0100",
+    "date": "2026-09-08",
+    "street": "100 Example Lane",
+    "city": "Lebanon, TN 37087",
+    "construction": [
+      "Crawlspace"
+    ],
+    "feetPerSquare": 2,
+    "gridUnit": "ft",
+    "items": [
+      {
+        "id": "2494d9fb-5be0-497f-940f-f36c7352785c",
+        "type": "outline",
+        "points": [
+          {
+            "x": 190,
+            "y": 210
+          },
+          {
+            "x": 590,
+            "y": 210
+          },
+          {
+            "x": 590,
+            "y": 540
+          },
+          {
+            "x": 430,
+            "y": 540
+          },
+          {
+            "x": 430,
+            "y": 610
+          },
+          {
+            "x": 190,
+            "y": 610
+          }
+        ],
+        "text": "MAIN RESIDENCE",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 14,
+        "closed": true,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "08ef8d2b-a55a-462d-ac45-de889d1acda9",
+        "type": "rect",
+        "points": [
+          {
+            "x": 70,
+            "y": 360
+          },
+          {
+            "x": 190,
+            "y": 550
+          }
+        ],
+        "text": "Garage",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "94dc18ef-d45a-4fbc-8b56-b2c05f849f97",
+        "type": "rect",
+        "points": [
+          {
+            "x": 240,
+            "y": 280
+          },
+          {
+            "x": 530,
+            "y": 460
+          }
+        ],
+        "text": "Crawlspace",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 1,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "diagonal",
+        "patternSpacing": 16
+      },
+      {
+        "id": "d21178a4-9645-4bf3-aaac-38865804f1ba",
+        "type": "rect",
+        "points": [
+          {
+            "x": 280,
+            "y": 610
+          },
+          {
+            "x": 400,
+            "y": 660
+          }
+        ],
+        "text": "Walkway",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 1,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "diagonal",
+        "patternSpacing": 16
+      },
+      {
+        "id": "4fb42ae1-48ca-4317-b3a8-8122242ce63b",
+        "type": "symbol",
+        "points": [
+          {
+            "x": 435,
+            "y": 540
+          }
+        ],
+        "text": "Z",
+        "symbol": "door",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "2272c5b5-2325-4fef-a4ce-8e1cbe5e126a",
+        "type": "symbol",
+        "points": [
+          {
+            "x": 200,
+            "y": 260
+          }
+        ],
+        "text": "XXX",
+        "symbol": "termites",
+        "color": "#b43b37",
+        "width": 2,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "085aa315-00cc-4679-ab6a-b2229d8adf90",
+        "type": "symbol",
+        "points": [
+          {
+            "x": 535,
+            "y": 340
+          }
+        ],
+        "text": "T",
+        "symbol": "tubes",
+        "color": "#b43b37",
+        "width": 2,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "482d2574-252c-4bae-8184-2dc9eef93fe8",
+        "type": "symbol",
+        "points": [
+          {
+            "x": 680,
+            "y": 150
+          }
+        ],
+        "text": "N",
+        "symbol": "north",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 14,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "29d3e48b-1ab2-407a-9367-f67580e0a04b",
+        "type": "label",
+        "points": [
+          {
+            "x": 385,
+            "y": 165
+          }
+        ],
+        "text": "EXAMPLE \u00b7 REPLACE BEFORE USE",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 16,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      },
+      {
+        "id": "b2715359-7a8b-4a83-8d04-739868aad0a8",
+        "type": "label",
+        "points": [
+          {
+            "x": 340,
+            "y": 710
+          }
+        ],
+        "text": "FRONT / STREET",
+        "symbol": "",
+        "color": "#183b42",
+        "width": 2,
+        "fontSize": 12,
+        "closed": false,
+        "pattern": "none",
+        "patternSpacing": 16
+      }
+    ],
+    "inspector": {
+      "notes": "SAMPLE ONLY. Example structure inspected for demonstration. Garage and crawlspace shown on graph. XXX marks an example observation at the west wall. Access door shown at rear. This is not a completed inspection.",
+      "name": "Alex Sample",
+      "certificate": "SAMPLE-123",
+      "date": "2026-09-08",
+      "signature": []
+    },
+    "control": {
+      "notes": "SAMPLE ONLY. No actual treatment was performed. This statement demonstrates the control technician section on the original form.",
+      "name": "Taylor Example",
+      "certificate": "SAMPLE-456",
+      "date": "2026-09-08",
+      "signature": []
+    },
+    "customSymbols": [],
+    "graphStyle": {
+      "background": "#fffef8",
+      "minor": "#d7dfdc",
+      "major": "#8fa19f",
+      "dimensions": "#183b42",
+      "showMeasurements": true,
+      "measurementFontSize": 10
+    }
+  }
+}
