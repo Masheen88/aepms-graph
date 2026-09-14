@@ -60,7 +60,11 @@ import {
   SYMBOLS,
   uid,
 } from "./lib/model.js";
-import { translatePoints } from "./lib/geometry.js";
+import { bounds, clamp, snapStepForScale, translatePoints } from "./lib/geometry.js";
+import {
+  canUseNativeAndroidFileSave,
+  savePdfWithNativeAndroidPicker,
+} from "./lib/nativeFileSave.js";
 
 const report = ref(blankReport()),
   revision = ref(0),
@@ -93,7 +97,12 @@ const records = ref([]),
 const paper = ref("letter"),
   monochrome = ref(true),
   darkMode = ref(false),
-  custom = ref({ title: "", text: "" });
+  custom = ref({ title: "", text: "" }),
+  preparedPdf = ref(null),
+  mobileFileFlow = ref(false),
+  credentialProfiles = ref([]),
+  noteTemplates = ref([]),
+  presetDraft = ref({ title: "", role: "inspector" });
 const selectedItems = computed(() => {
   const ids = new Set(selectedIds.value);
   return report.value.items.filter((item) => ids.has(item.id));
@@ -106,6 +115,7 @@ const selectedTitle = computed(() => {
   if (selectedCount.value > 1) return `${selectedCount.value} objects selected`;
   const names = {
     rect: "Area / rectangle",
+    ellipse: "Oval / circular area",
     outline: "Structure outline",
     line: "Line",
     curve: "Curved path",
@@ -118,6 +128,7 @@ const selectedTitle = computed(() => {
 const selectedTypeSummary = computed(() => {
   const names = {
     rect: "areas",
+    ellipse: "ovals",
     outline: "outlines",
     line: "lines",
     curve: "curves",
@@ -132,14 +143,14 @@ const selectedTypeSummary = computed(() => {
     .join(' · ');
 });
 const selectedHasOptionalLabel = computed(() =>
-  ["rect", "outline", "line", "curve", "freehand"].includes(selected.value?.type),
+  ["rect", "ellipse", "outline", "line", "curve", "freehand"].includes(selected.value?.type),
 );
 const selectedSupportsPattern = computed(() =>
-  selected.value?.type === "rect" ||
+  ["rect", "ellipse"].includes(selected.value?.type) ||
   (selected.value?.closed && ["outline", "curve", "freehand"].includes(selected.value?.type)),
 );
 const selectedSupportsMeasurement = computed(() =>
-  ["rect", "outline", "line", "curve"].includes(selected.value?.type),
+  ["rect", "ellipse", "outline", "line", "curve"].includes(selected.value?.type),
 );
 const selectedSupportsClosedShape = computed(() =>
   ["outline", "curve", "freehand"].includes(selected.value?.type),
@@ -147,6 +158,21 @@ const selectedSupportsClosedShape = computed(() =>
 const selectedSupportsRotation = computed(() =>
   selected.value?.points?.length === 1 && ["label", "symbol"].includes(selected.value?.type),
 );
+const selectedSupportsCornerTreatment = computed(() =>
+  ["rect", "outline", "line"].includes(selected.value?.type),
+);
+const selectedSupportsPointEditing = computed(() =>
+  ["outline", "line"].includes(selected.value?.type),
+);
+const selectedCornerStyle = computed(() => {
+  if (!selected.value) return "square";
+  if (selected.value.cornerStyle) return selected.value.cornerStyle;
+  // v1.3 rounded rectangles did not persist a cornerStyle field.
+  return selected.value.type === "rect" && Number(selected.value.cornerRadius || 0) > 0
+    ? "round"
+    : "square";
+});
+const cornerSnapStep = computed(() => snapStepForScale(report.value.feetPerSquare));
 const snapDistance = computed(() => {
   const scale = Number(report.value.feetPerSquare) || 1;
   return Math.min(1, Math.max(0.1, scale));
@@ -166,14 +192,21 @@ const tools = [
   { id: "select", label: "Select", icon: MousePointer2, key: "V" },
   { id: "outline", label: "Outline", icon: ScanLine, key: "O" },
   { id: "rect", label: "Room", icon: Square, key: "R" },
-  { id: "hatch", label: "Hatch area", icon: Grid2X2, key: "A" },
+  { id: "rounded", label: "Rounded", icon: Square, key: "U" },
+  { id: "beveled", label: "Bevel", icon: Square, key: "J" },
+  { id: "ellipse", label: "Oval", icon: Circle, key: "E" },
+  { id: "hatch", label: "Hatch box", icon: Grid2X2, key: "A" },
+  { id: "hatchpoly", label: "Hatch polygon", icon: Grid2X2, key: "G" },
   { id: "line", label: "Line", icon: MoveUpRight, key: "L" },
   { id: "curve", label: "Curve", icon: Pencil, key: "C" },
+  { id: "curvearea", label: "Curved area", icon: Pencil, key: "K" },
   { id: "freehand", label: "Draw", icon: Pencil, key: "B" },
   { id: "label", label: "Label", icon: Type, key: "T" },
   { id: "point", label: "Point", icon: Circle, key: "P" },
   { id: "pan", label: "Pan", icon: Hand, key: "H" },
 ];
+const LOCAL_REPORT_PREFIX = "tf-native-report:";
+
 let draftTimer,
   previewTimer,
   toastTimer,
@@ -246,6 +279,44 @@ function resetGraphStyle() {
   report.value.graphStyle = { ...DEFAULT_GRAPH_STYLE };
   recordHistory();
 }
+function setAllMeasurements(value) {
+  report.value.graphStyle.showMeasurements = value;
+  report.value.items = report.value.items.map((item) =>
+    ["rect", "ellipse", "outline", "line", "curve"].includes(item.type)
+      ? { ...item, showMeasurements: value }
+      : item,
+  );
+  recordHistory();
+  notify(value ? "Measurements enabled for all measurable objects." : "Measurements hidden for all objects.");
+}
+function setSelectedMeasurements(value) {
+  if (!selectedCount.value) return;
+  const ids = new Set(selectedIds.value);
+  report.value.items = report.value.items.map((item) =>
+    ids.has(item.id) && ["rect", "ellipse", "outline", "line", "curve"].includes(item.type)
+      ? { ...item, showMeasurements: value }
+      : item,
+  );
+  if (value) report.value.graphStyle.showMeasurements = true;
+  recordHistory();
+}
+function setAllLabels(value) {
+  report.value.items = report.value.items.map((item) =>
+    ["rect", "ellipse", "outline", "line", "curve", "freehand"].includes(item.type)
+      ? { ...item, showLabel: value }
+      : item,
+  );
+  recordHistory();
+  notify(value ? "Drawing labels shown." : "Drawing labels hidden.");
+}
+function selectItemFromPanel(id) {
+  setTool("select");
+  setSelection([id], id);
+}
+function itemDisplayName(item) {
+  const names = { rect: "Area", ellipse: "Oval", outline: "Outline", line: "Line", curve: "Curve", freehand: "Drawing", label: "Label", symbol: "Mark" };
+  return item.text?.trim() || `${names[item.type] || "Object"} ${report.value.items.indexOf(item) + 1}`;
+}
 function setLineAutoConnect(value) {
   lineAutoConnect.value = value;
   try {
@@ -297,6 +368,101 @@ function patchSelectedPoint(axis, value) {
   selected.value.points = [point];
   recordHistory();
 }
+function pointCoordinateFromDistance(axis, value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const scale = Number(report.value.feetPerSquare) || 1;
+  const limit = axis === "x" ? GRID.width : GRID.height;
+  let world = (numeric / scale) * GRID.step;
+  if (snap.value) {
+    const step = snapStepForScale(scale);
+    world = Math.round(world / step) * step;
+  }
+  return clamp(world, 0, limit);
+}
+function patchSelectedVertex(index, axis, value) {
+  if (!selectedSupportsPointEditing.value || !selected.value?.points[index]) return;
+  const coordinate = pointCoordinateFromDistance(axis, value);
+  if (coordinate === null) return;
+  const points = clone(selected.value.points);
+  points[index] = { ...points[index], [axis]: coordinate };
+  selected.value.points = points;
+  recordHistory();
+}
+function minimumSelectedPointCount() {
+  if (!selected.value) return 0;
+  return selected.value.type === "outline" && selected.value.closed ? 3 : 2;
+}
+function canDeleteSelectedVertex() {
+  return Boolean(selected.value && selected.value.points.length > minimumSelectedPointCount());
+}
+function deleteSelectedVertex(index) {
+  if (!selectedSupportsPointEditing.value || !canDeleteSelectedVertex()) {
+    notify("This object needs its remaining points to stay valid.");
+    return;
+  }
+  const points = clone(selected.value.points);
+  points.splice(index, 1);
+  selected.value.points = points;
+  recordHistory();
+}
+function insertSelectedVertexAfter(index) {
+  if (!selectedSupportsPointEditing.value || selected.value.points.length >= 6000) return;
+  const points = clone(selected.value.points);
+  const nextIndex = index + 1;
+  const next = points[nextIndex] || (selected.value.closed ? points[0] : null);
+  const current = points[index];
+  if (!current || !next) return;
+  const raw = { x: (current.x + next.x) / 2, y: (current.y + next.y) / 2 };
+  const step = cornerSnapStep.value;
+  const midpoint = snap.value
+    ? {
+        x: clamp(Math.round(raw.x / step) * step, 0, GRID.width),
+        y: clamp(Math.round(raw.y / step) * step, 0, GRID.height),
+      }
+    : raw;
+  if (
+    snap.value &&
+    [current, next].some((endpoint) => Math.hypot(endpoint.x - midpoint.x, endpoint.y - midpoint.y) < 0.01)
+  ) {
+    notify("No additional snap point fits on that segment. Lengthen it or turn Snap off first.");
+    return;
+  }
+  points.splice(nextIndex, 0, midpoint);
+  selected.value.points = points;
+  recordHistory();
+}
+function patchSelectedCornerStyle(value) {
+  if (!selectedSupportsCornerTreatment.value || !selected.value) return;
+  selected.value.cornerStyle = value;
+  if (value !== "square" && Number(selected.value.cornerRadius || 0) < 0.5) {
+    selected.value.cornerRadius = Math.min(120, cornerSnapStep.value * 2);
+  }
+  recordHistory();
+}
+function patchSelectedCornerRadius(value) {
+  if (!selectedSupportsCornerTreatment.value || !selected.value) return;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return;
+  const step = cornerSnapStep.value;
+  selected.value.cornerRadius = clamp(Math.round(numeric / step) * step, 0, 120);
+}
+function convertSelectedRectToOutline() {
+  if (!selected.value || selected.value.type !== "rect") return;
+  const box = bounds(selected.value);
+  const style = selectedCornerStyle.value;
+  selected.value.type = "outline";
+  selected.value.points = [
+    { x: box.x, y: box.y },
+    { x: box.right, y: box.y },
+    { x: box.right, y: box.bottom },
+    { x: box.x, y: box.bottom },
+  ];
+  selected.value.closed = true;
+  selected.value.cornerStyle = style;
+  recordHistory();
+  notify("Rectangle converted to an editable 4-point outline.");
+}
 function deleteSelected() {
   if (!selectedCount.value) return;
   const ids = new Set(selectedIds.value);
@@ -321,11 +487,93 @@ function download(bytes, name, type) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = name;
+  anchor.rel = "noopener";
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+async function savePreparedPdf() {
+  if (!preparedPdf.value) return;
+  const name = `${filename()}.pdf`;
+  const blob = new Blob([preparedPdf.value.bytes], { type: "application/pdf" });
+
+  // The installed Android app runs inside a Capacitor WebView. Browser download
+  // APIs are not a dependable "Save As" mechanism there, so use the native
+  // Storage Access Framework first. ACTION_CREATE_DOCUMENT opens Android's real
+  // location/name picker and writes only after the inspector chooses a target.
+  if (canUseNativeAndroidFileSave()) {
+    try {
+      const result = await savePdfWithNativeAndroidPicker(
+        preparedPdf.value.bytes,
+        name,
+      );
+
+      if (result?.cancelled) {
+        notify("PDF save cancelled.");
+        return;
+      }
+
+      if (result?.saved) {
+        notify("PDF saved to your device.");
+        return;
+      }
+
+      throw new Error("Android did not confirm that the PDF was saved.");
+    } catch (nativeError) {
+      // Keep a visible error instead of silently pretending an <a download>
+      // worked inside the WebView. The browser/share fallbacks below still give
+      // the inspector another path if an older native project lacks the plugin.
+      console.error("Native Android PDF save failed:", nativeError);
+      error.value =
+        "Android could not open the native PDF save picker. Run pnpm android so the native PdfSaver plugin is installed, then try again.";
+    }
+  }
+
+  // Prefer a real save picker in desktop browsers that expose the File System
+  // Access API. This branch is normally skipped inside the Android application.
+  if (typeof globalThis.showSaveFilePicker === "function") {
+    try {
+      const handle = await globalThis.showSaveFilePicker({
+        suggestedName: name,
+        types: [
+          {
+            description: "PDF document",
+            accept: { "application/pdf": [".pdf"] },
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      error.value = "";
+      notify("PDF saved to your device.");
+      return;
+    } catch (e) {
+      if (e?.name === "AbortError") return;
+      // Some browsers expose the API but reject it for their current context.
+      // Continue into the share/download fallbacks rather than losing the PDF.
+    }
+  }
+
+  try {
+    const file = new File([blob], name, { type: "application/pdf" });
+    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+      await navigator.share({ files: [file], title: report.value.title });
+      error.value = "";
+      notify("PDF sent to your device's save/share sheet.");
+      return;
+    }
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+  }
+
+  // Browser-only final fallback. Android should normally have returned from the
+  // native picker above; this remains useful for desktop/mobile web installs.
+  download(preparedPdf.value.bytes, name, "application/pdf");
+  notify("PDF download started.");
+}
+
 function filename() {
   return (
     report.value.title.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-|-$/g, "") ||
@@ -345,9 +593,12 @@ function backup() {
   notify("Editable backup downloaded.");
 }
 async function request(path, options = {}) {
+  // Allow field-save calls to fail over to the already-written local copy quickly
+  // without making every report-service request use the shorter timeout.
+  const { timeoutMs = 20000, ...fetchOptions } = options;
   const response = await fetch(path, {
-    ...options,
-    signal: AbortSignal.timeout(20000),
+    ...fetchOptions,
+    signal: fetchOptions.signal || AbortSignal.timeout(timeoutMs),
   });
   let data;
   try {
@@ -357,10 +608,176 @@ async function request(path, options = {}) {
       "The report service did not respond. Your work is still here.",
     );
   }
-  if (!response.ok)
-    throw new Error(data.error || "The request failed. Please try again.");
+  if (!response.ok) {
+    const requestError = new Error(data.error || "The request failed. Please try again.");
+    requestError.status = response.status;
+    throw requestError;
+  }
   return data;
 }
+function persistFieldPresets() {
+  try {
+    localStorage.setItem("tf-credential-profiles", JSON.stringify(credentialProfiles.value));
+    localStorage.setItem("tf-note-templates", JSON.stringify(noteTemplates.value));
+  } catch {
+    notify("This browser could not save field presets locally.");
+  }
+}
+function beginCredentialSave(role) {
+  const statement = report.value[role];
+  if (!statement.name.trim() && !statement.certificate.trim() && !statement.signature.length) {
+    notify("Add a name, certification number, or signature before saving credentials.");
+    return;
+  }
+  presetDraft.value = { title: statement.name.trim() || "Technician", role };
+  modal.value = "save-credential";
+}
+function saveCredentialPreset() {
+  const role = presetDraft.value.role;
+  const statement = report.value[role];
+  const title = presetDraft.value.title.trim();
+  if (!title) return;
+  credentialProfiles.value.push({
+    id: uid(),
+    title,
+    name: statement.name,
+    certificate: statement.certificate,
+    signature: clone(statement.signature),
+  });
+  persistFieldPresets();
+  modal.value = null;
+  notify(`Saved ${title} for future inspections on this device.`);
+}
+function applyCredentialPreset({ role, id }) {
+  const profile = credentialProfiles.value.find((entry) => entry.id === id);
+  if (!profile || !report.value[role]) return;
+  report.value[role] = {
+    ...report.value[role],
+    name: profile.name,
+    certificate: profile.certificate,
+    signature: clone(profile.signature),
+    date: report.value[role].date || localDate(),
+  };
+  recordHistory();
+  notify(`Applied ${profile.title}.`);
+}
+function beginNoteTemplateSave(role) {
+  if (!report.value[role].notes.trim()) return;
+  presetDraft.value = { title: "", role };
+  modal.value = "save-note-template";
+}
+function saveNoteTemplatePreset() {
+  const role = presetDraft.value.role;
+  const title = presetDraft.value.title.trim();
+  if (!title) return;
+  noteTemplates.value.push({
+    id: uid(),
+    title,
+    role,
+    text: report.value[role].notes.trim(),
+  });
+  persistFieldPresets();
+  modal.value = null;
+  notify(`Saved note template “${title}”.`);
+}
+function deleteCredentialPreset(id) {
+  credentialProfiles.value = credentialProfiles.value.filter((entry) => entry.id !== id);
+  persistFieldPresets();
+}
+function deleteNoteTemplate(id) {
+  noteTemplates.value = noteTemplates.value.filter((entry) => entry.id !== id);
+  persistFieldPresets();
+}
+
+function localReportKey(id) {
+  return `${LOCAL_REPORT_PREFIX}${id}`;
+}
+function normalizeLocalReportEnvelope(value, fallbackId = "") {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value.report || value;
+  const parsed = reportSchema.safeParse(candidate);
+  if (!parsed.success) return null;
+  const reportValue = parsed.data;
+  if (fallbackId && reportValue.id !== fallbackId) return null;
+  return {
+    report: reportValue,
+    revision: Number.isInteger(value.revision) && value.revision >= 0 ? value.revision : 0,
+    updatedAt:
+      typeof value.updatedAt === "string"
+        ? value.updatedAt
+        : typeof value.updated_at === "string"
+          ? value.updated_at
+          : `${reportValue.date || localDate()}T12:00:00.000Z`,
+  };
+}
+function readLocalReport(id) {
+  try {
+    const raw = localStorage.getItem(localReportKey(id));
+    if (!raw) return null;
+    return normalizeLocalReportEnvelope(JSON.parse(raw), id);
+  } catch {
+    return null;
+  }
+}
+function localReportRecords() {
+  const entries = [];
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(LOCAL_REPORT_PREFIX)) continue;
+      const id = key.slice(LOCAL_REPORT_PREFIX.length);
+      const envelope = readLocalReport(id);
+      if (!envelope) continue;
+      entries.push({
+        id: envelope.report.id,
+        title: envelope.report.title,
+        address: envelope.report.street,
+        revision: envelope.revision,
+        updated_at: envelope.updatedAt,
+        source: "device",
+      });
+    }
+  } catch {
+    return [];
+  }
+  return entries.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+}
+function persistLocalReport(snapshot, serverRevision = revision.value) {
+  try {
+    const updatedAt = new Date().toISOString();
+    localStorage.setItem(
+      localReportKey(snapshot.id),
+      JSON.stringify({
+        application: "Termite Fieldbook",
+        storage: "device",
+        report: snapshot,
+        revision: serverRevision,
+        updatedAt,
+      }),
+    );
+    return updatedAt;
+  } catch {
+    return null;
+  }
+}
+function clearSavedDraft(id) {
+  clearTimeout(draftTimer);
+  try {
+    localStorage.removeItem(`tf-draft:${id}`);
+  } catch {
+    /* Device-local report saving does not depend on draft cleanup. */
+  }
+}
+function mergeReportRecords(serverRecords, deviceRecords) {
+  const merged = new Map();
+  for (const record of serverRecords || []) merged.set(record.id, { ...record, source: "server" });
+  for (const record of deviceRecords || []) {
+    const current = merged.get(record.id);
+    if (!current || new Date(record.updated_at) > new Date(current.updated_at)) merged.set(record.id, record);
+  }
+  return [...merged.values()].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+}
+
 function stashDraft() {
   if (!dirty.value) return;
   try {
@@ -389,6 +806,7 @@ async function save() {
   }
   busy.value = true;
   const snapshot = clone(result.data);
+  const localSavedAt = persistLocalReport(snapshot, revision.value);
   try {
     const data = await request(`/api/reports/${snapshot.id}`, {
       method: "PUT",
@@ -397,22 +815,34 @@ async function save() {
         report: snapshot,
         expectedRevision: revision.value,
       }),
+      // The device copy was already written above. Do not leave technicians
+      // staring at a spinner for 20 seconds when the optional API is offline.
+      timeoutMs: 6000,
     });
     revision.value = data.revision;
+    persistLocalReport(snapshot, revision.value);
     savedSnapshot.value = JSON.stringify(snapshot);
-    clearTimeout(draftTimer);
-    if (dirty.value) stashDraft();
-    else {
-      try {
-        localStorage.removeItem(`tf-draft:${snapshot.id}`);
-      } catch {
-        /* Saving the server record does not depend on local storage. */
-      }
-    }
-    notify("Inspection saved.");
+    clearSavedDraft(snapshot.id);
+    notify("Inspection saved on this device and synced.");
     return true;
   } catch (e) {
-    error.value = e.message;
+    if (localSavedAt && e?.status === 409) {
+      savedSnapshot.value = JSON.stringify(snapshot);
+      clearSavedDraft(snapshot.id);
+      error.value = `${e.message} Your current version is safely saved on this device.`;
+      return false;
+    }
+    if (localSavedAt) {
+      // A field device must still have a real Save operation when the optional report
+      // service is offline. Keep the server revision unchanged so a later sync can use
+      // optimistic concurrency safely instead of pretending the server accepted it.
+      savedSnapshot.value = JSON.stringify(snapshot);
+      clearSavedDraft(snapshot.id);
+      error.value = "";
+      notify("Inspection saved on this device. Server sync is currently unavailable.");
+      return true;
+    }
+    error.value = `${e.message} Device storage was also unavailable; download an editable backup before leaving this page.`;
     stashDraft();
     return false;
   } finally {
@@ -472,20 +902,37 @@ async function openRecords() {
   modal.value = "reports";
   loadingRecords.value = true;
   error.value = "";
+  const deviceRecords = localReportRecords();
   try {
-    records.value = (await request("/api/reports")).reports;
-  } catch (e) {
-    error.value = e.message;
+    const serverRecords = (await request("/api/reports")).reports;
+    records.value = mergeReportRecords(serverRecords, deviceRecords);
+  } catch {
+    records.value = deviceRecords;
+    if (deviceRecords.length) notify("Report service unavailable; showing inspections saved on this device.");
+    else error.value = "No device-saved inspections were found, and the report service is unavailable.";
   } finally {
     loadingRecords.value = false;
   }
 }
-async function loadRecord(id) {
+async function loadRecord(record) {
+  const id = typeof record === "string" ? record : record.id;
+  const local = readLocalReport(id);
+  if (record?.source === "device" && local) {
+    guard(() => replaceReport(local.report, local.revision));
+    return;
+  }
   try {
     const data = await request(`/api/reports/${id}`);
     const parsed = reportSchema.parse(data.report);
+    // Keep a device mirror whenever a server record is opened successfully.
+    persistLocalReport(parsed, data.revision);
     guard(() => replaceReport(parsed, data.revision));
   } catch (e) {
+    if (local) {
+      notify("Report service unavailable; opened the device-saved copy instead.");
+      guard(() => replaceReport(local.report, local.revision));
+      return;
+    }
     error.value = e.message;
   }
 }
@@ -537,10 +984,10 @@ async function buildPreview() {
       assetsPromise = null;
       throw e;
     });
-    const font = await assetsPromise;
+    const assets = await assetsPromise;
     const result = await pdf.createFormPdf(
       clone(report.value),
-      font,
+      assets,
       { paper: paper.value, monochrome: monochrome.value },
     );
     if (run === previewRun) pages.value = result.overlays;
@@ -559,12 +1006,18 @@ async function exportPdf() {
   if (exportErrors.value.length) return;
   const result = await buildPreview();
   if (!result) return;
+  preparedPdf.value = result;
+  if (mobileFileFlow.value) {
+    notify(`${result.pageCount}-page PDF prepared. Tap Save PDF to device.`);
+    return;
+  }
   download(result.bytes, `${filename()}.pdf`, "application/pdf");
   modal.value = null;
   notify(`${result.pageCount}-page PDF downloaded.`);
 }
 function openExport() {
   graph.value?.finishOutline();
+  preparedPdf.value = null;
   modal.value = "export";
 }
 function addCustom() {
@@ -631,6 +1084,7 @@ function visibility() {
 watch(
   report,
   () => {
+    preparedPdf.value = null;
     clearTimeout(draftTimer);
     draftTimer = setTimeout(stashDraft, 450);
   },
@@ -664,6 +1118,8 @@ onMounted(() => {
       ? savedTheme === "dark"
       : globalThis.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
     lineAutoConnect.value = localStorage.getItem("tf-line-auto-connect") !== "0";
+    credentialProfiles.value = JSON.parse(localStorage.getItem("tf-credential-profiles") || "[]");
+    noteTemplates.value = JSON.parse(localStorage.getItem("tf-note-templates") || "[]");
     const drafts = Object.keys(localStorage)
       .filter((k) => k.startsWith("tf-draft:"))
       .flatMap((k) => {
@@ -679,6 +1135,7 @@ onMounted(() => {
   } catch {
     /* Restricted browsers may disable draft recovery; server saving still works. */
   }
+  mobileFileFlow.value = navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   window.addEventListener("keydown", keyboard);
   window.addEventListener("beforeunload", leave);
   document.addEventListener("visibilitychange", visibility);
@@ -697,7 +1154,7 @@ onBeforeUnmount(() => {
   <div class="app-shell" :class="{ 'theme-dark': darkMode }">
     <header class="app-header">
       <a href="/" class="brand" @click.prevent="tab = 'graph'"
-        ><span class="brand-icon"><House :size="25" /></span
+        ><span class="brand-icon company-brand-icon"><img src="/company-logo.png" alt="Apple's Environmental Pest Management Solutions" /></span
         ><span>Fieldbook<small>TERMITE INSPECTIONS</small></span></a
       >
       <div class="document-title">
@@ -871,6 +1328,14 @@ onBeforeUnmount(() => {
           >
             <Layers :size="15" /> {{ multiSelectMode ? 'Multi-select on' : 'Multi-select' }}
           </button>
+          <button
+            class="toolbar-pill measurement-pill"
+            :class="{ active: report.graphStyle.showMeasurements }"
+            :aria-pressed="report.graphStyle.showMeasurements"
+            @click="setAllMeasurements(!report.graphStyle.showMeasurements)"
+          >
+            <ScanLine :size="15" /> {{ report.graphStyle.showMeasurements ? 'Measurements on' : 'Measurements off' }}
+          </button>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
               >Snap every {{ snapLabel }}</span
@@ -902,6 +1367,12 @@ onBeforeUnmount(() => {
           @select-tool="setTool"
           @position="position = $event"
         />
+        <div v-if="selectedCount" class="mobile-selection-actions" aria-label="Selected object actions">
+          <span>{{ selectedCount }} selected</span>
+          <button class="btn btn-secondary" @click="panelOpen = true"><Settings2 :size="16" /> Edit</button>
+          <button class="btn btn-secondary" @click="duplicateSelected"><Layers :size="16" /> Copy</button>
+          <button class="btn btn-danger" @click="deleteSelected"><Trash2 :size="16" /> Delete</button>
+        </div>
         <footer class="canvas-footer">
           <span
             ><Layers :size="14" /> {{ report.items.length }}
@@ -917,6 +1388,22 @@ onBeforeUnmount(() => {
         </footer>
       </section>
       <aside class="inspector-panel" :class="{ 'panel-open': panelOpen }">
+        <div class="panel-mobile-header">
+          <div><strong>Graph tools & settings</strong><small>Edit selected marks or add new ones.</small></div>
+          <button class="icon-button" aria-label="Close graph settings" @click="panelOpen = false"><X :size="20" /></button>
+        </div>
+        <div class="panel-section mobile-quick-controls">
+          <div class="section-heading">
+            <h3>Quick display controls</h3>
+            <span>ALL OBJECTS</span>
+          </div>
+          <div class="bulk-action-grid">
+            <button class="btn btn-secondary" @click="setAllMeasurements(true)"><ScanLine :size="15" /> Measurements on</button>
+            <button class="btn btn-secondary" @click="setAllMeasurements(false)"><ScanLine :size="15" /> Measurements off</button>
+            <button class="btn btn-secondary" @click="setAllLabels(true)"><Type :size="15" /> Labels on</button>
+            <button class="btn btn-secondary" @click="setAllLabels(false)"><Type :size="15" /> Labels off</button>
+          </div>
+        </div>
         <template v-if="selectedCount">
           <div class="panel-heading">
             <div>
@@ -999,7 +1486,7 @@ onBeforeUnmount(() => {
                   "
                 >
                   <option
-                    v-for="size in [1, 2, 3, 4, 6]"
+                    v-for="size in [0.5, 0.75, 1, 1.5, 2, 3, 4, 6]"
                     :key="size"
                     :value="size"
                   >
@@ -1007,6 +1494,43 @@ onBeforeUnmount(() => {
                   </option>
                 </select></label
               >
+            </div>
+            <div v-if="selectedSupportsCornerTreatment" class="corner-editor">
+              <div class="field-pair">
+                <label class="field">
+                  <span>Corner style</span>
+                  <select :value="selectedCornerStyle" @change="patchSelectedCornerStyle($event.target.value)">
+                    <option value="square">Square</option>
+                    <option value="round">Rounded / radius</option>
+                    <option value="bevel">Bevel / chamfer</option>
+                  </select>
+                </label>
+                <label v-if="selectedCornerStyle !== 'square'" class="field">
+                  <span>Corner size</span>
+                  <div class="range-field">
+                    <input
+                      type="range"
+                      min="0"
+                      max="120"
+                      :step="cornerSnapStep"
+                      :value="selected.cornerRadius || 0"
+                      @input="patchSelectedCornerRadius($event.target.value)"
+                      @change="recordHistory"
+                    />
+                    <strong>{{ formatDistance(selected.cornerRadius || 0) }} {{ report.gridUnit }}</strong>
+                  </div>
+                </label>
+              </div>
+              <button
+                v-if="selected.type === 'rect'"
+                class="btn btn-secondary w-full"
+                @click="convertSelectedRectToOutline"
+              >
+                <Pencil :size="16" /> Convert to editable 4-point outline
+              </button>
+              <p class="small-help">
+                Rounded and beveled setbacks snap to the current grid increment. Lines and outlines apply the treatment at editable vertices; convert a rectangle when you need to move its corners independently.
+              </p>
             </div>
             <label class="field"
               ><span>Ink color</span>
@@ -1087,6 +1611,8 @@ onBeforeUnmount(() => {
                   <option value="none">None</option>
                   <option value="diagonal">Diagonal marks</option>
                   <option value="crosshatch">Crosshatch</option>
+                  <option value="horizontal">Horizontal marks</option>
+                  <option value="vertical">Vertical marks</option>
                 </select></label
               ><label class="field"
                 ><span>Pattern spacing</span
@@ -1125,6 +1651,63 @@ onBeforeUnmount(() => {
                   @change="patchSelectedPoint('y', $event.target.value)"
               /></label>
             </div>
+            <div v-if="selectedSupportsPointEditing" class="vertex-editor">
+              <div class="vertex-editor-heading">
+                <span>
+                  <strong>Object points</strong>
+                  <small>{{ selected.points.length }} editable {{ selected.points.length === 1 ? 'point' : 'points' }}</small>
+                </span>
+                <small>White handles move points · green + handles add points</small>
+              </div>
+              <div class="vertex-list">
+                <div v-for="(point, index) in selected.points" :key="`vertex-${index}`" class="vertex-row">
+                  <span class="vertex-number">{{ index + 1 }}</span>
+                  <label class="field vertex-coordinate">
+                    <span>X</span>
+                    <input
+                      type="number"
+                      min="0"
+                      :max="(GRID.width / GRID.step) * report.feetPerSquare"
+                      :step="snapDistance"
+                      :value="formatDistance(point.x)"
+                      @change="patchSelectedVertex(index, 'x', $event.target.value)"
+                    />
+                  </label>
+                  <label class="field vertex-coordinate">
+                    <span>Y</span>
+                    <input
+                      type="number"
+                      min="0"
+                      :max="(GRID.height / GRID.step) * report.feetPerSquare"
+                      :step="snapDistance"
+                      :value="formatDistance(point.y)"
+                      @change="patchSelectedVertex(index, 'y', $event.target.value)"
+                    />
+                  </label>
+                  <button
+                    v-if="index < selected.points.length - 1 || selected.closed"
+                    class="icon-button vertex-action"
+                    :aria-label="`Add point after point ${index + 1}`"
+                    title="Add midpoint after this point"
+                    @click="insertSelectedVertexAfter(index)"
+                  >
+                    <Plus :size="16" />
+                  </button>
+                  <button
+                    class="icon-button vertex-action vertex-delete"
+                    :disabled="!canDeleteSelectedVertex()"
+                    :aria-label="`Delete point ${index + 1}`"
+                    title="Delete this point"
+                    @click="deleteSelectedVertex(index)"
+                  >
+                    <Trash2 :size="16" />
+                  </button>
+                </div>
+              </div>
+              <p class="small-help">
+                Coordinates use {{ report.gridUnit }} and follow the current snap setting. Add a midpoint, drag it into place, or delete any extra point while keeping the object valid.
+              </p>
+            </div>
             <div v-if="tool !== 'select'" class="edit-object-callout">
               <span>Keep drawing with <strong>{{ tool === 'line' ? 'Line' : tools.find((t) => t.id === tool)?.label || 'the active tool' }}</strong>, or switch to Select to move/resize this object.</span>
               <button class="btn btn-secondary" @click="setTool('select')">
@@ -1132,11 +1715,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <p class="small-help">
-              In Select mode, drag the object to move it. Round handles edit
-              individual points; square corner handles resize the whole object,
-              including freehand drawings; the green rotate handle turns single-point
-              symbols and labels. Arrow keys nudge by 1 px; hold Shift to nudge
-              by 10 px. Hold Shift while rotating for free-angle rotation.
+              In Select mode, drag the object to move it. White round handles edit individual points; green + handles insert a midpoint on lines/outlines; square corner handles resize the whole object, including freehand drawings. The green rotate handle turns single-point symbols and labels. Arrow keys nudge by 1 px; hold Shift to nudge by 10 px.
             </p>
             <div class="flex gap-2">
               <button
@@ -1165,6 +1744,10 @@ onBeforeUnmount(() => {
               </span>
               <input type="checkbox" :checked="multiSelectMode" @change="toggleMultiSelectMode" />
             </label>
+            <div class="bulk-action-grid">
+              <button class="btn btn-secondary" @click="setSelectedMeasurements(true)">Measurements on</button>
+              <button class="btn btn-secondary" @click="setSelectedMeasurements(false)">Measurements off</button>
+            </div>
             <p class="small-help">
               Drag any selected item to move the whole selection together. Use Delete to remove all selected objects, or Duplicate to copy them as a group. For detailed edits such as labels, measurements, or patterns, reduce the selection to one object.
             </p>
@@ -1215,6 +1798,46 @@ onBeforeUnmount(() => {
               "
             >
               <Grid2X2 :size="18" /> Diagonal area</button
+            ><button
+              :class="{ active: tool === 'hatchpoly' }"
+              @click="
+                setTool('hatchpoly');
+                panelOpen = false;
+              "
+            >
+              <Grid2X2 :size="18" /> Hatch polygon</button
+            ><button
+              :class="{ active: tool === 'rounded' }"
+              @click="
+                setTool('rounded');
+                panelOpen = false;
+              "
+            >
+              <Square :size="18" /> Rounded area</button
+            ><button
+              :class="{ active: tool === 'beveled' }"
+              @click="
+                setTool('beveled');
+                panelOpen = false;
+              "
+            >
+              <Square :size="18" /> Beveled area</button
+            ><button
+              :class="{ active: tool === 'ellipse' }"
+              @click="
+                setTool('ellipse');
+                panelOpen = false;
+              "
+            >
+              <Circle :size="18" /> Oval / circle</button
+            ><button
+              :class="{ active: tool === 'curvearea' }"
+              @click="
+                setTool('curvearea');
+                panelOpen = false;
+              "
+            >
+              <Pencil :size="18" /> Curved hatch area</button
             ><button
               @click="selectSymbol(SYMBOLS.find((s) => s.key === 'door'))"
             >
@@ -1273,14 +1896,37 @@ onBeforeUnmount(() => {
           </div>
           <label class="checkbox-field measurement-toggle">
             <input v-model="report.graphStyle.showMeasurements" type="checkbox" @change="recordHistory" />
-            Show measurements by default
+            Master measurement visibility
           </label>
+          <div class="bulk-settings">
+            <span>Bulk controls</span>
+            <div class="bulk-action-grid">
+              <button class="btn btn-secondary" @click="setAllMeasurements(true)">All measurements on</button>
+              <button class="btn btn-secondary" @click="setAllMeasurements(false)">All measurements off</button>
+              <button class="btn btn-secondary" @click="setAllLabels(true)">All labels on</button>
+              <button class="btn btn-secondary" @click="setAllLabels(false)">All labels off</button>
+            </div>
+          </div>
           <label class="field">
             <span>Measurement font size</span>
             <select v-model.number="report.graphStyle.measurementFontSize" @change="recordHistory">
               <option v-for="size in [6, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24]" :key="size" :value="size">{{ size }}</option>
             </select>
           </label>
+        </div>
+        <div v-if="report.items.length" class="panel-section object-browser">
+          <div class="section-heading"><h3>Objects on graph</h3><span>TAP TO EDIT</span></div>
+          <div class="object-browser-list">
+            <button
+              v-for="item in report.items"
+              :key="item.id"
+              :class="{ active: selectedIds.includes(item.id) }"
+              @click="selectItemFromPanel(item.id)"
+            >
+              <span><strong>{{ itemDisplayName(item) }}</strong><small>{{ item.type }}</small></span>
+              <ArrowRight :size="15" />
+            </button>
+          </div>
         </div>
         <div class="panel-section panel-bottom">
           <button
@@ -1302,13 +1948,15 @@ onBeforeUnmount(() => {
           <span class="eyebrow">INSPECTION RECORD</span>
           <h1>Details & technician notes</h1>
           <p>
-            Complete the inspector or control statement. Fill out both when
-            applicable.
+            Inspector and control statements are optional. Complete either, both, or neither as the job requires.
           </p>
         </div>
-        <button class="btn btn-secondary" @click="tab = 'graph'">
-          <ArrowLeft :size="17" /> Back to graph
-        </button>
+        <div class="page-heading-actions">
+          <button class="btn btn-secondary" @click="modal = 'presets'">Saved presets</button>
+          <button class="btn btn-secondary" @click="tab = 'graph'">
+            <ArrowLeft :size="17" /> Back to graph
+          </button>
+        </div>
       </div>
       <section class="property-card">
         <div class="section-heading">
@@ -1398,11 +2046,19 @@ onBeforeUnmount(() => {
         <StatementForm
           v-model="report.inspector"
           role="inspector"
-          @change="recordHistory"
+          :credential-profiles="credentialProfiles"
+          :note-templates="noteTemplates"
+          @save-credentials="beginCredentialSave"
+          @save-note-template="beginNoteTemplateSave"
+          @apply-credential="applyCredentialPreset"
         /><StatementForm
           v-model="report.control"
           role="control"
-          @change="recordHistory"
+          :credential-profiles="credentialProfiles"
+          :note-templates="noteTemplates"
+          @save-credentials="beginCredentialSave"
+          @save-note-template="beginNoteTemplateSave"
+          @apply-credential="applyCredentialPreset"
         />
       </div>
       <div class="notes-footer">
@@ -1481,7 +2137,7 @@ onBeforeUnmount(() => {
       <div v-else-if="!records.length" class="empty-records">
         <FolderOpen :size="32" />
         <h3>No saved inspections yet</h3>
-        <p>Use Save to keep this graph and its notes.</p>
+        <p>Use Save to keep this graph and its notes on this device.</p>
         <button class="btn btn-primary" @click="modal = null">
           Return to inspection
         </button>
@@ -1490,14 +2146,14 @@ onBeforeUnmount(() => {
         <button
           v-for="record in records"
           :key="record.id"
-          @click="loadRecord(record.id)"
+          @click="loadRecord(record)"
         >
           <span class="report-icon"><FileText :size="22" /></span
           ><span
             ><strong>{{ record.title }}</strong
             ><small
               >{{ record.address || "No address added" }} ·
-              {{ new Date(record.updated_at).toLocaleDateString() }}</small
+              {{ new Date(record.updated_at).toLocaleDateString() }}{{ record.source === "device" ? " · On this device" : "" }}</small
             ></span
           ><ArrowRight :size="17" />
         </button>
@@ -1610,47 +2266,69 @@ onBeforeUnmount(() => {
         ><input v-model="monochrome" type="checkbox" /> Export markings in black
         ink</label
       >
-      <div v-if="exportErrors.length" class="export-checklist">
-        <strong>A few details are still needed</strong>
-        <ul>
-          <li v-for="message in exportErrors" :key="message">{{ message }}</li>
-        </ul>
-        <button
-          class="text-button"
-          @click="
-            tab = 'notes';
-            modal = null;
-          "
-        >
-          Complete technician notes <ArrowRight :size="16" />
-        </button>
-      </div>
-      <p v-else class="export-ready">
-        <Check :size="18" /> Technician details complete
+      <p class="export-ready">
+        <Check :size="18" /> Ready to export — technician statements are optional
       </p>
       <p class="small-help">
-        The export no longer uses the warped photographed form. The preview and
-        PDF share the same vector grid and drawing coordinates. Long statements
-        continue on additional sheets; for two-sided printing, flip on the long edge.
+        The preview and PDF share the same vector grid, supplied company logo, and drawing coordinates.
+        On Android, prepare the PDF first and then choose Save PDF to device to open the native Android file picker. The app does not open a browser PDF tab for saving.
+        Long statements continue on additional sheets; for two-sided printing, flip on the long edge.
       </p>
-      <div class="modal-actions">
-        <button class="btn btn-secondary" @click="backup">
-          Editable backup</button
-        ><button
+      <div class="modal-actions export-actions">
+        <button class="btn btn-secondary" @click="backup">Editable backup</button>
+        <button
+          v-if="!mobileFileFlow || !preparedPdf"
           class="btn btn-primary"
-          :disabled="busyPdf || exportErrors.length > 0"
+          :disabled="busyPdf"
           @click="exportPdf"
         >
-          <LoaderCircle v-if="busyPdf" :size="17" class="spin" /><Download
-            v-else
-            :size="17"
-          />{{ busyPdf ? "Preparing…" : "Download PDF" }}
+          <LoaderCircle v-if="busyPdf" :size="17" class="spin" /><Download v-else :size="17" />
+          {{ busyPdf ? "Preparing…" : mobileFileFlow ? "Prepare PDF" : "Download PDF" }}
+        </button>
+        <button v-else class="btn btn-primary" @click="savePreparedPdf">
+          <Download :size="17" /> Save PDF to device
         </button>
       </div>
       <p v-if="error" class="inline-error" role="alert">
         {{ error }}
       </p></ModalShell
     >
+    <ModalShell v-if="modal === 'save-credential'" title="Save technician credentials" @close="modal = null">
+      <form @submit.prevent="saveCredentialPreset">
+        <p class="modal-description">Save the current signed name, certification number, and drawn signature on this device for future inspections.</p>
+        <label class="field"><span>Preset name</span><input v-model="presetDraft.title" maxlength="80" required placeholder="e.g. Matthew — Inspector" /></label>
+        <div class="modal-actions"><button type="button" class="btn btn-secondary" @click="modal = null">Cancel</button><button class="btn btn-primary" type="submit">Save credentials</button></div>
+      </form>
+    </ModalShell>
+    <ModalShell v-if="modal === 'save-note-template'" title="Save note template" @close="modal = null">
+      <form @submit.prevent="saveNoteTemplatePreset">
+        <p class="modal-description">Save the current notes as a reusable {{ presetDraft.role === 'inspector' ? 'inspection' : 'control' }} template on this device.</p>
+        <label class="field"><span>Template name</span><input v-model="presetDraft.title" maxlength="80" required placeholder="e.g. Standard crawlspace inspection" /></label>
+        <div class="modal-actions"><button type="button" class="btn btn-secondary" @click="modal = null">Cancel</button><button class="btn btn-primary" type="submit">Save template</button></div>
+      </form>
+    </ModalShell>
+    <ModalShell v-if="modal === 'presets'" title="Saved field presets" wide @close="modal = null">
+      <p class="modal-description">These presets stay in this browser/device and can be reused on future inspection reports.</p>
+      <div class="preset-manager-grid">
+        <section>
+          <h3>Technician credentials</h3>
+          <p v-if="!credentialProfiles.length" class="small-help">No saved technicians yet.</p>
+          <div v-for="profile in credentialProfiles" :key="profile.id" class="preset-row">
+            <span><strong>{{ profile.title }}</strong><small>{{ profile.name || 'No typed name' }} · {{ profile.certificate || 'No certification #' }}</small></span>
+            <button class="icon-button danger" aria-label="Delete credential preset" @click="deleteCredentialPreset(profile.id)"><Trash2 :size="17" /></button>
+          </div>
+        </section>
+        <section>
+          <h3>Note templates</h3>
+          <p v-if="!noteTemplates.length" class="small-help">No saved note templates yet.</p>
+          <div v-for="template in noteTemplates" :key="template.id" class="preset-row">
+            <span><strong>{{ template.title }}</strong><small>{{ template.role === 'inspector' ? 'Inspection' : 'Control' }} · {{ template.text.slice(0, 70) }}{{ template.text.length > 70 ? '…' : '' }}</small></span>
+            <button class="icon-button danger" aria-label="Delete note template" @click="deleteNoteTemplate(template.id)"><Trash2 :size="17" /></button>
+          </div>
+        </section>
+      </div>
+    </ModalShell>
+
     <ModalShell
       v-if="modal === 'help'"
       title="Working with your graph"
@@ -1662,12 +2340,10 @@ onBeforeUnmount(() => {
           the outline.
         </p>
         <p>
-          <strong>Curved walkways and steps</strong>Use Curve to sketch a curved
-          path, then turn on Closed shape and Diagonal marks if it should become
-          a walkway or slab. Use the Steps / stair symbol for stair runs.
+          <strong>Rounded, beveled, curved, and hatched areas</strong>Use Rounded for radius corners, Bevel for chamfered corners, Oval for circles/ellipses, Hatch polygon for irregular slabs, or Curved area for gardens and curved sidewalks. Any closed area can use diagonal, crosshatch, horizontal, or vertical marks.
         </p>
         <p>
-          <strong>Move, reshape, rotate, and group</strong>Choose Select. Drag a mark
+          <strong>Move, reshape, delete, and group</strong>Choose Select. On phones, selected objects get large touch handles plus Edit / Copy / Delete actions at the bottom. Drag a mark
           to move it, drag its round handles to reposition individual points,
           drag the square handles to resize, and drag the green rotate handle on
           single-point labels or symbols to turn them. Use Shift-click on desktop

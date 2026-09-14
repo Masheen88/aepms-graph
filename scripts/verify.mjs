@@ -12,8 +12,10 @@ import {
 } from "../src/lib/model.js";
 import {
   constrained,
+  corneredPathPoints,
   primitives,
   resizePoints,
+  resolvedCornerStyle,
   snapStepForScale,
   translatePoints,
 } from "../src/lib/geometry.js";
@@ -58,8 +60,13 @@ const invalid = clone(report);
 invalid.items[0].points[0].x = -1;
 assert.equal(reportSchema.safeParse(invalid).success, false);
 const incomplete = clone(report);
-incomplete.control.name = "";
-assert.ok(statementErrors(incomplete).some((v) => v.includes("signed name")));
+incomplete.control = { notes: "", name: "", certificate: "", date: "", signature: [] };
+incomplete.inspector = { notes: "", name: "", certificate: "", date: "", signature: [] };
+assert.equal(
+  statementErrors(incomplete).length,
+  0,
+  "Inspector and control statements must remain optional for save/export",
+);
 assert.deepEqual(
   translatePoints(
     [
@@ -135,6 +142,54 @@ assert.ok(
   curvedMarks.some((mark) => mark.kind === "path" && mark.smooth),
   "Curve objects must render as smooth paths",
 );
+const rounded = clone(patterned);
+// Simulate a v1.3 backup: cornerRadius existed before cornerStyle was introduced.
+delete rounded.cornerStyle;
+rounded.cornerRadius = 28;
+assert.equal(resolvedCornerStyle(rounded), "round");
+const roundedMarks = primitives(rounded, {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+assert.ok(
+  roundedMarks.some((mark) => mark.kind === "path" && mark.closed && mark.points.length > 8),
+  "Rounded rectangles must render with curved-corner geometry",
+);
+const bevelOutline = clone(report.items.find((item) => item.type === "outline"));
+bevelOutline.cornerStyle = "bevel";
+bevelOutline.cornerRadius = 20;
+const bevelPoints = corneredPathPoints(bevelOutline);
+assert.ok(
+  bevelPoints.length > bevelOutline.points.length,
+  "Beveled outlines must replace each treated vertex with chamfer endpoints",
+);
+const roundLine = {
+  ...clone(bevelOutline),
+  id: crypto.randomUUID(),
+  type: "line",
+  closed: false,
+  cornerStyle: "round",
+  points: [
+    { x: 100, y: 100 },
+    { x: 200, y: 100 },
+    { x: 200, y: 200 },
+  ],
+};
+assert.ok(
+  corneredPathPoints(roundLine).length > roundLine.points.length,
+  "Multi-point lines must support rounded internal corners",
+);
+const ellipse = { ...clone(patterned), id: crypto.randomUUID(), type: "ellipse", cornerRadius: 0 };
+const ellipseMarks = primitives(ellipse, {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+assert.ok(
+  ellipseMarks.some((mark) => mark.kind === "path" && mark.closed && mark.points.length >= 40),
+  "Oval areas must render as closed scalable geometry",
+);
 
 const root = await mkdtemp(join(tmpdir(), "fieldbook-verify-"));
 let db;
@@ -185,9 +240,12 @@ try {
 }
 
 const fontBytes = await readFile("public/DejaVuSans.ttf");
+const logoBytes = await readFile("public/company-logo.png");
+const printAssets = { fontBytes, logoBytes };
 await mkdir("examples", { recursive: true });
-const pdf = await createFormPdf(report, fontBytes);
+const pdf = await createFormPdf(report, printAssets);
 assert.equal(pdf.pageCount, 2);
+assert.ok(pdf.overlays[0].marks.some((mark) => mark.kind === "image" && mark.source === "company-logo"));
 const document = await PDFDocument.load(pdf.bytes);
 assert.equal(document.getPageCount(), 2);
 assert.equal(document.getPage(0).getWidth(), 612);
@@ -202,7 +260,7 @@ long.inspector.notes = Array.from(
   { length: 80 },
   (_, i) => `Observation ${i + 1}: example note.`,
 ).join("\n");
-const overflow = await createFormPdf(long, fontBytes);
+const overflow = await createFormPdf(long, printAssets);
 assert.ok(overflow.pageCount > 2);
 assert.equal(
   (await PDFDocument.load(overflow.bytes)).getPageCount(),
@@ -217,8 +275,8 @@ assert.ok(
 );
 const unicode = clone(report);
 unicode.inspector.name = "José Núñez";
-assert.ok((await createFormPdf(unicode, fontBytes)).bytes.length > 0);
-const sourceSize = await createFormPdf(report, fontBytes, {
+assert.ok((await createFormPdf(unicode, printAssets)).bytes.length > 0);
+const sourceSize = await createFormPdf(report, printAssets, {
   paper: "original",
 });
 assert.equal(
@@ -226,5 +284,5 @@ assert.equal(
   1950,
 );
 console.log(
-  "PASS: validation, 1-unit default scale, scale-aware 1-unit snapping, resizing, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
+  "PASS: validation, optional technician statements, company logo output, 1-unit default scale, scale-aware snapping, resizing, rounded/beveled/oval areas, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
 );

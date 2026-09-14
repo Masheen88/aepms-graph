@@ -22,6 +22,7 @@ import {
   GRAPH_CORNERS,
   PRINT_GRAPH,
   primitives,
+  svgPath,
   toForm,
 } from "./geometry.js";
 
@@ -159,6 +160,15 @@ function graphGrid(list, report) {
 
 function frontTemplate(report, font) {
   const marks = [];
+  // Company artwork is a real print primitive so it appears in both preview and PDF.
+  marks.push({
+    kind: "image",
+    source: "company-logo",
+    x: 42,
+    y: 42,
+    width: 125,
+    height: 103,
+  });
   // This is a clean vector recreation of the printed form, not the skewed photographed scan.
   addText(
     marks,
@@ -358,13 +368,18 @@ function statementOverlay(list, font, statement, key, lines, pageNumber, more) {
 
 export async function createFormPdf(
   raw,
-  fontBytes,
+  assets,
   { paper = "letter", monochrome = true } = {},
 ) {
   const report = reportSchema.parse(raw);
+  // Accept the old font-only argument too so older integrations fail gracefully while
+  // the app moves to the combined font + company-logo print asset bundle.
+  const fontBytes = assets?.fontBytes || assets;
+  const logoBytes = assets?.logoBytes || null;
   const document = await PDFDocument.create();
   document.registerFontkit(fontkit);
   const font = await document.embedFont(fontBytes, { subset: true });
+  const companyLogo = logoBytes ? await document.embedPng(logoBytes) : null;
 
   // Reject missing glyphs explicitly instead of exporting blank squares in names or notes.
   const printable = [
@@ -460,7 +475,15 @@ export async function createFormPdf(
           clip(),
           endPath(),
         );
-      if (mark.kind === "rect") {
+      if (mark.kind === "image") {
+        if (companyLogo && mark.source === "company-logo")
+          page.drawImage(companyLogo, {
+            x: mark.x,
+            y: height - mark.y - mark.height,
+            width: mark.width,
+            height: mark.height,
+          });
+      } else if (mark.kind === "rect") {
         page.drawRectangle({
           x: mark.x,
           y: height - mark.y - mark.height,
@@ -471,9 +494,7 @@ export async function createFormPdf(
           borderWidth: mark.borderWidth || 0,
         });
       } else if (mark.kind === "path") {
-        const d =
-          mark.points.map((p, i) => `${i ? "L" : "M"} ${p.x} ${p.y}`).join(" ") +
-          (mark.closed ? " Z" : "");
+        const d = svgPath(mark);
         page.drawSvgPath(d, {
           x: 0,
           y: height,
@@ -534,10 +555,19 @@ export async function createFormPdf(
 }
 
 export async function loadPrintAssets() {
-  // The old captured PDF is intentionally no longer loaded. Only the embedded font is
-  // required because the printable form is rebuilt as straight vector artwork.
-  const response = await fetch("/DejaVuSans.ttf");
-  if (!response.ok)
+  // The old captured PDF is intentionally no longer loaded. The clean vector form needs
+  // the bundled font plus the supplied company logo so preview and PDF remain identical.
+  const [fontResponse, logoResponse] = await Promise.all([
+    fetch("/DejaVuSans.ttf"),
+    fetch("/company-logo.png"),
+  ]);
+  if (!fontResponse.ok)
     throw new Error("The print font could not be loaded. Reconnect and try again.");
-  return response.arrayBuffer();
+  if (!logoResponse.ok)
+    throw new Error("The company logo could not be loaded. Reconnect and try again.");
+  const [fontBytes, logoBytes] = await Promise.all([
+    fontResponse.arrayBuffer(),
+    logoResponse.arrayBuffer(),
+  ]);
+  return { fontBytes, logoBytes };
 }

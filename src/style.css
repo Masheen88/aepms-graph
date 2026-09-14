@@ -2567,3 +2567,546 @@ kbd {
     display: none;
   }
 }
+
+/* v1.3 field/mobile overhaul: company branding, larger touch editing, reusable presets,
+   bulk measurement controls, and additional rounded/curved hatch tools. */
+.company-brand-icon {
+  overflow: hidden;
+  padding: 2px;
+  background: white;
+  border: 1px solid #dbe4e7;
+}
+.company-brand-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.panel-mobile-header {
+  display: none;
+}
+.mobile-quick-controls {
+  display: none;
+}
+.mobile-selection-actions {
+  display: none;
+}
+.range-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 10px;
+}
+.range-field input[type="range"] {
+  width: 100%;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.range-field strong {
+  text-align: center;
+  font-size: 0.8rem;
+  color: #45636a;
+}
+.bulk-settings {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.bulk-settings > span {
+  color: #60777e;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+.bulk-action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.bulk-action-grid .btn {
+  min-height: 38px;
+  padding: 7px 9px;
+  white-space: normal;
+  font-size: 0.73rem;
+}
+.object-browser .section-heading {
+  margin-bottom: 10px;
+}
+.object-browser-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.object-browser-list > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid #e0e8ea;
+  border-radius: 7px;
+  background: #fbfcfc;
+  color: #48636a;
+  text-align: left;
+}
+.object-browser-list > button.active {
+  border-color: #8bbdb4;
+  background: #edf7f4;
+  color: #225f58;
+}
+.object-browser-list > button span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.object-browser-list strong,
+.object-browser-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-browser-list strong {
+  font-size: 0.78rem;
+}
+.object-browser-list small {
+  color: #87979b;
+  font-size: 0.67rem;
+  text-transform: capitalize;
+}
+.statement-optional {
+  display: block;
+  margin-top: 4px;
+  color: #819297;
+  font-size: 0.7rem;
+  font-weight: 450;
+  line-height: 1.35;
+}
+.statement-preset-row,
+.note-template-row {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+.statement-preset-row .field,
+.note-template-row select {
+  margin-bottom: 0;
+}
+.compact-field {
+  flex: 1;
+  margin-bottom: 0 !important;
+}
+.statement-preset-row .btn,
+.note-template-row .btn {
+  min-height: 44px;
+  padding: 8px 11px;
+}
+.note-template-row select {
+  flex: 1;
+}
+.note-template-row .text-button {
+  min-height: 44px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+.page-heading-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.preset-manager-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.preset-manager-grid section {
+  min-width: 0;
+}
+.preset-manager-grid h3 {
+  margin-bottom: 12px;
+}
+.preset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid #e6edef;
+}
+.preset-row > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.preset-row strong,
+.preset-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preset-row strong {
+  font-size: 0.84rem;
+}
+.preset-row small {
+  color: #7e9095;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.export-actions {
+  flex-wrap: wrap;
+}
+.cursor-rounded,
+.cursor-beveled,
+.cursor-ellipse,
+.cursor-hatch,
+.cursor-hatchpoly,
+.cursor-curve,
+.cursor-curvearea {
+  cursor: crosshair;
+}
+
+.theme-dark .company-brand-icon {
+  background: white;
+  border-color: #4b5c61;
+}
+.theme-dark .object-browser-list > button,
+.theme-dark .preset-row,
+.theme-dark .setting-toggle {
+  border-color: #34484e;
+}
+.theme-dark .object-browser-list > button {
+  background: #132126;
+  color: #cad8da;
+}
+.theme-dark .object-browser-list > button.active {
+  background: #203833;
+  border-color: #5b9388;
+}
+.theme-dark .range-field strong,
+.theme-dark .bulk-settings > span,
+.theme-dark .statement-optional,
+.theme-dark .preset-row small {
+  color: #9aadb1;
+}
+
+@media (max-width: 959px) {
+  .mobile-quick-controls {
+    display: block;
+  }
+  .panel-mobile-header {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 15px;
+    background: white;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel-mobile-header > div {
+    display: grid;
+    gap: 2px;
+  }
+  .panel-mobile-header strong {
+    font-size: 0.88rem;
+  }
+  .panel-mobile-header small {
+    color: #789096;
+    font-size: 0.7rem;
+  }
+  .theme-dark .panel-mobile-header {
+    background: #172327;
+  }
+}
+
+@media (max-width: 639px) {
+  /* The old mobile panel was placed below the graph, which made the settings/menu
+     appear missing. It is now a full-screen, scrollable tool drawer. */
+  .inspector-panel,
+  .inspector-panel.panel-open {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: 100%;
+    max-width: none;
+    max-height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-bottom: calc(26px + env(safe-area-inset-bottom));
+    border: 0;
+    box-shadow: none;
+    background: white;
+  }
+  .inspector-panel:not(.panel-open) {
+    display: none;
+  }
+  .inspector-panel.panel-open {
+    display: block;
+  }
+  .theme-dark .inspector-panel {
+    background: #172327;
+  }
+  .panel-mobile-header {
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+  .mobile-panel-toggle {
+    min-width: 44px;
+    min-height: 44px;
+    border: 1px solid #d9e4e6;
+    background: white;
+  }
+  .measurement-pill {
+    order: 3;
+  }
+  .canvas-toolbar .snap-toggle {
+    order: 4;
+    margin-left: 0;
+  }
+  .canvas-toolbar .mobile-panel-toggle {
+    margin-left: auto;
+  }
+  .mobile-selection-actions {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    z-index: 25;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px;
+    border: 1px solid #d3e0e2;
+    border-radius: 12px;
+    background: #fffffff5;
+    box-shadow: 0 10px 30px #183b4233;
+    backdrop-filter: blur(10px);
+  }
+  .mobile-selection-actions > span {
+    min-width: 0;
+    margin-right: auto;
+    padding-left: 5px;
+    color: #526d73;
+    font-size: 0.72rem;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  .mobile-selection-actions .btn {
+    min-height: 42px;
+    padding: 7px 9px;
+    font-size: 0.72rem;
+  }
+  .theme-dark .mobile-selection-actions {
+    border-color: #42565c;
+    background: #172327f2;
+  }
+  .theme-dark .mobile-selection-actions > span {
+    color: #b7c7ca;
+  }
+  .statement-preset-row,
+  .note-template-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .statement-preset-row .compact-field,
+  .note-template-row select {
+    flex: 1 1 100%;
+  }
+  .statement-preset-row .btn,
+  .note-template-row .btn,
+  .note-template-row .text-button {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  .preset-manager-grid {
+    grid-template-columns: 1fr;
+  }
+  .page-heading-actions {
+    width: 100%;
+  }
+  .page-heading-actions .btn {
+    flex: 1;
+    font-size: 0.76rem !important;
+    padding: 9px 10px !important;
+  }
+  .page-heading-actions .btn svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+  .bulk-action-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .object-browser-list {
+    max-height: 42vh;
+  }
+}
+
+/* Keep utility actions reachable on phones instead of hiding them behind desktop-only space. */
+@media (max-width: 639px) {
+  .workspace-nav {
+    flex-wrap: wrap;
+  }
+  .nav-utilities {
+    display: flex;
+    width: 100%;
+    min-height: 44px;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 4px 0 8px;
+    border-top: 1px solid #eef2f3;
+  }
+  .nav-utilities .text-button {
+    min-height: 38px;
+    padding: 0 8px;
+    font-size: 0.76rem;
+    gap: 6px;
+  }
+  .nav-utilities .text-button svg {
+    width: 17px;
+    height: 17px;
+  }
+  .nav-utilities .icon-button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .theme-dark .nav-utilities {
+    border-color: #2f4248;
+  }
+}
+
+/* Point-level geometry editing -------------------------------------------------
+   Keep point controls dense enough for the side panel while preserving 44px-ish
+   touch targets on phones. The graph itself uses much larger invisible hit areas. */
+.selection-insert-hit {
+  cursor: copy !important;
+}
+.corner-editor {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #dbe6e7;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+.corner-editor .field,
+.vertex-editor .field {
+  margin-bottom: 0;
+}
+.vertex-editor {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 16px;
+  padding: 12px;
+  border: 1px solid #dbe6e7;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+.vertex-editor-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.vertex-editor-heading > span {
+  display: grid;
+  gap: 2px;
+}
+.vertex-editor-heading strong {
+  font-size: 0.83rem;
+  color: #34585e;
+}
+.vertex-editor-heading small {
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: #758b90;
+}
+.vertex-list {
+  display: grid;
+  gap: 8px;
+  max-height: 330px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.vertex-row {
+  display: grid;
+  grid-template-columns: 30px minmax(72px, 1fr) minmax(72px, 1fr) 38px 38px;
+  align-items: end;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid #e1e9ea;
+  border-radius: 7px;
+  background: #fff;
+}
+.vertex-number {
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #e8f3f0;
+  color: #2c716a;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.vertex-coordinate {
+  gap: 4px;
+}
+.vertex-coordinate > span {
+  font-size: 0.68rem !important;
+}
+.vertex-coordinate input {
+  min-width: 0;
+}
+.vertex-action {
+  width: 38px;
+  height: 38px;
+  align-self: end;
+}
+.vertex-delete {
+  color: #a23f3b;
+}
+.vertex-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.theme-dark .corner-editor,
+.theme-dark .vertex-editor {
+  border-color: #34484e;
+  background: #142328;
+}
+.theme-dark .vertex-row {
+  border-color: #34484e;
+  background: #101d21;
+}
+.theme-dark .vertex-editor-heading strong {
+  color: #d1dfe1;
+}
+.theme-dark .vertex-number {
+  background: #23413f;
+  color: #a9d8d1;
+}
+@media (max-width: 680px) {
+  .vertex-row {
+    grid-template-columns: 28px minmax(64px, 1fr) minmax(64px, 1fr) 42px 42px;
+    gap: 5px;
+    padding: 7px;
+  }
+  .vertex-action {
+    width: 42px;
+    height: 42px;
+  }
+  .vertex-list {
+    max-height: 42vh;
+  }
+  .vertex-editor-heading {
+    display: grid;
+  }
+}

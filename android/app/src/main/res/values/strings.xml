@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Apple\'s Termite Fieldbook</string>
+    <string name="title_activity_main">Apple\'s Termite Fieldbook</string>
+    <string name="package_name">com.applespest.termitefieldbook</string>
+    <string name="custom_url_scheme">com.applespest.termitefieldbook</string>
+</resources>

@@ -39,9 +39,11 @@ const svg = ref(null),
   view = ref({ x: -35, y: -35, w: 870, h: 890 }),
   drawing = ref(null),
   pending = ref([]),
+  pendingTool = ref(null),
   lineAnchor = ref(null),
   quickPan = ref(false),
-  marquee = ref(null);
+  marquee = ref(null),
+  coarsePointer = ref(false);
 const selectedSet = computed(() => new Set(props.selectedIds || []));
 const selectedItems = computed(() =>
   props.items.filter((item) => selectedSet.value.has(item.id)),
@@ -58,8 +60,8 @@ let action = null,
   before = null,
   space = false;
 // Keep the visible edit handles compact while giving touch users a larger invisible grab target.
-const radius = computed(() => (6 * view.value.w) / 870);
-const handleHitRadius = computed(() => (15 * view.value.w) / 870);
+const radius = computed(() => ((coarsePointer.value ? 9 : 6) * view.value.w) / 870);
+const handleHitRadius = computed(() => ((coarsePointer.value ? 54 : 18) * view.value.w) / 870);
 const selectedBounds = computed(() =>
   singleSelected.value ? bounds(singleSelected.value) : null,
 );
@@ -119,6 +121,62 @@ const rotateHandle = computed(() => {
   );
   return { ...handle, center };
 });
+
+const editablePointHandles = computed(() => {
+  const item = singleSelected.value;
+  if (!item || item.type === "freehand") return [];
+  // Curves can contain hundreds of sampled points. Expose a useful subset of control
+  // handles so phone users can reshape them without covering the whole path in dots.
+  if (item.type === "curve" && item.points.length > 14) {
+    const step = Math.ceil((item.points.length - 1) / 12);
+    const indexes = new Set([0, item.points.length - 1]);
+    for (let index = step; index < item.points.length - 1; index += step) indexes.add(index);
+    return [...indexes].sort((a, b) => a - b).map((index) => ({ index, point: item.points[index] }));
+  }
+  return item.points.map((point, index) => ({ index, point }));
+});
+
+function insertionPoint(start, end) {
+  if (!start || !end) return null;
+  const raw = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  const point = constrained(raw, props.snap ? snapStep.value : false);
+  // If a snapped midpoint lands directly on an existing endpoint, there is no
+  // additional grid location available on this short segment. Hide/skip the + control.
+  if (
+    props.snap &&
+    ([start, end].some((endpoint) => Math.hypot(endpoint.x - point.x, endpoint.y - point.y) < 0.01))
+  )
+    return null;
+  return point;
+}
+
+const insertPointHandles = computed(() => {
+  const item = singleSelected.value;
+  if (!item || !["outline", "line"].includes(item.type) || item.points.length < 2) return [];
+  const segmentCount = item.points.length - 1 + (item.closed ? 1 : 0);
+  return Array.from({ length: segmentCount }, (_, index) => {
+    const start = item.points[index];
+    const end = item.points[(index + 1) % item.points.length];
+    return { index, point: insertionPoint(start, end) };
+  }).filter((handle) => handle.point);
+});
+
+function insertPointAtSegment(segmentIndex) {
+  const item = singleSelected.value;
+  if (!item || !["outline", "line"].includes(item.type) || item.points.length >= 6000) return;
+  const start = item.points[segmentIndex];
+  const end = item.points[(segmentIndex + 1) % item.points.length];
+  const midpoint = insertionPoint(start, end);
+  if (!midpoint) return;
+  const points = clone(item.points);
+  points.splice(segmentIndex + 1, 0, midpoint);
+  const items = props.items.map((entry) =>
+    entry.id === item.id ? { ...entry, points } : entry,
+  );
+  updateItems(items);
+  commit(items);
+}
+
 const lineChainMarker = computed(() =>
   props.tool === "line" && props.lineAutoConnect && lineAnchor.value
     ? lineAnchor.value
@@ -128,16 +186,22 @@ const hint = computed(
   () =>
     ({
       select:
-        "Tap an object to select it. On desktop, Shift-click or drag a selection box to select multiple objects. On touch, drag empty space to pan and use Multi-select to add items.",
+        "Tap an object to select it. White handles move vertices and green + handles insert points on lines/outlines. On touch, drag empty space to pan and use Multi-select to add items.",
       outline:
         "Tap to add corners. Tap the first corner or choose Finish to close.",
       rect: "Drag from one corner to the opposite corner.",
-      hatch: "Drag an area, then edit the label or pattern from the object panel.",
+      rounded: "Drag a rounded area. Radius size snaps to the active drawing grid and can be changed in Edit.",
+      beveled: "Drag a beveled area. Chamfer size snaps to the active drawing grid and can be changed in Edit.",
+      ellipse: "Drag an oval or circular area. Add hatch marks from Edit if needed.",
+      hatch: "Drag a rectangular hatch area, then edit its label or pattern.",
+      hatchpoly: "Tap each corner of an irregular hatch area, then choose Finish.",
       garage: "Drag to place a garage.",
       crawlspace: "Drag to place a crawlspace.",
       line: "Drag to draw a line. Line stays active for the next segment; auto-connect can continue from the previous endpoint. Press V or Esc when finished.",
       curve:
-        "Drag to draw a curved path. Turn on Closed shape and Diagonal marks afterwards for curved walkways or beds.",
+        "Drag to draw a curved path. Turn on Closed shape and a hatch pattern afterwards for curved walkways or beds.",
+      curvearea:
+        "Draw a curved closed area for gardens or curved sidewalks; it starts with diagonal hatch marks.",
       freehand: "Draw with your finger, pen, or mouse.",
       label: "Tap the grid to place a label.",
       point: "Tap to add a point.",
@@ -155,7 +219,7 @@ function screenPoint(event) {
     : { x: 0, y: 0 };
 }
 function gridPoint(event) {
-  const shouldSnap = props.snap && !["freehand", "curve"].includes(props.tool);
+  const shouldSnap = props.snap && !["freehand", "curve", "curvearea"].includes(props.tool);
   return constrained(screenPoint(event), shouldSnap ? snapStep.value : false);
 }
 function rawGridPoint(event) {
@@ -219,19 +283,25 @@ function resetInteraction(restore = false) {
   marquee.value = null;
 }
 function finishOutline(close = true) {
-  if (pending.value.length >= 2) {
+  const hatchPolygon = pendingTool.value === "hatchpoly";
+  const minimumPoints = hatchPolygon ? 3 : 2;
+  if (pending.value.length >= minimumPoints) {
     const shape = newItem("outline", clone(pending.value), {
-      closed: close && pending.value.length >= 3,
+      closed: hatchPolygon ? pending.value.length >= 3 : close && pending.value.length >= 3,
+      text: hatchPolygon ? "Hatched area" : "",
+      pattern: hatchPolygon ? "diagonal" : "none",
     });
     commit([...props.items, shape]);
     setSelection([shape.id], shape.id);
     // Explicitly finishing a structure enters edit mode so mistakes can be corrected.
-    if (close) emit("select-tool", "select");
+    if (close || hatchPolygon) emit("select-tool", "select");
   }
   pending.value = [];
+  pendingTool.value = null;
 }
 function cancel() {
   pending.value = [];
+  pendingTool.value = null;
   resetInteraction(true);
 }
 function movementForGroup(group, dx, dy) {
@@ -268,12 +338,15 @@ function pointerDown(event) {
   if (pointers.size > 1) return;
   const p = gridPoint(event);
   const targetId = event.target.closest("[data-item-id]")?.dataset.itemId;
+  const editControl = event.target.closest(
+    "[data-insert-point], [data-rotate], [data-resize], [data-handle]",
+  );
   if (
     props.tool === "pan" ||
     quickPan.value ||
     event.button === 1 ||
     space ||
-    (event.pointerType === "touch" && props.tool === "select" && !targetId)
+    (event.pointerType === "touch" && props.tool === "select" && !targetId && !editControl)
   ) {
     action = {
       kind: "pan",
@@ -285,6 +358,11 @@ function pointerDown(event) {
     return;
   }
   if (props.tool === "select") {
+    const insertPoint = event.target.closest("[data-insert-point]");
+    if (insertPoint && singleSelected.value) {
+      insertPointAtSegment(Number(insertPoint.dataset.insertPoint));
+      return;
+    }
     const rotate = event.target.closest("[data-rotate]");
     const resize = event.target.closest("[data-resize]");
     const handle = event.target.closest("[data-handle]");
@@ -352,9 +430,9 @@ function pointerDown(event) {
   const raw = screenPoint(event);
   if (raw.x < 0 || raw.x > GRID.width || raw.y < 0 || raw.y > GRID.height)
     return;
-  if (props.tool === "outline") {
+  if (["outline", "hatchpoly"].includes(props.tool)) {
     // Place on release so a second finger can turn this tap into a pinch gesture.
-    action = { kind: "corner", point: p };
+    action = { kind: "corner", point: p, tool: props.tool };
     return;
   }
   if (["label", "symbol", "point"].includes(props.tool)) {
@@ -366,9 +444,11 @@ function pointerDown(event) {
     };
     return;
   }
-  const type = ["garage", "crawlspace", "hatch"].includes(props.tool)
+  const type = ["garage", "crawlspace", "hatch", "rounded", "beveled"].includes(props.tool)
     ? "rect"
-    : props.tool;
+    : props.tool === "curvearea"
+      ? "curve"
+      : props.tool;
   const start =
     props.tool === "line" && props.lineAutoConnect && lineAnchor.value && !event.altKey
       ? clone(lineAnchor.value)
@@ -382,10 +462,22 @@ function pointerDown(event) {
           ? "Crawlspace"
           : props.tool === "hatch"
             ? "Slab / paved area"
-            : "",
-    pattern: props.tool === "hatch" ? "diagonal" : "none",
+            : props.tool === "rounded"
+              ? "Rounded area"
+              : props.tool === "beveled"
+                ? "Beveled area"
+                : props.tool === "ellipse"
+                ? "Oval area"
+                : props.tool === "curvearea"
+                  ? "Curved area"
+                  : "",
+    pattern: ["hatch", "curvearea"].includes(props.tool) ? "diagonal" : "none",
+    closed: props.tool === "curvearea",
+    cornerStyle:
+      props.tool === "rounded" ? "round" : props.tool === "beveled" ? "bevel" : "square",
+    cornerRadius: ["rounded", "beveled"].includes(props.tool) ? 20 : 0,
   });
-  if (["rect", "line", "garage", "crawlspace", "hatch"].includes(props.tool))
+  if (["rect", "ellipse", "line", "garage", "crawlspace", "hatch", "rounded", "beveled"].includes(props.tool))
     drawing.value.points = [start, start];
   action = { kind: "create", start };
 }
@@ -497,6 +589,7 @@ function pointerUp(event) {
     return;
   }
   if (action?.kind === "corner") {
+    pendingTool.value ||= action.tool;
     const p = action.point,
       first = pending.value[0],
       last = pending.value.at(-1);
@@ -543,7 +636,8 @@ function pointerUp(event) {
   } else if (action?.kind === "create" && drawing.value) {
     const b = bounds(drawing.value),
       validSize = Math.hypot(b.right - b.x, b.bottom - b.y) > 2,
-      validStroke = drawing.value.points.length >= 2 && validSize;
+      minimumPoints = drawing.value.closed && ["curve", "freehand"].includes(drawing.value.type) ? 3 : 2,
+      validStroke = drawing.value.points.length >= minimumPoints && validSize;
     if (validStroke) {
       const created = clone(drawing.value);
       commit([...props.items, created]);
@@ -646,7 +740,10 @@ watch(
     if (!value) clearLineAnchor();
   },
 );
-onMounted(() => window.addEventListener("keyup", releaseSpace));
+onMounted(() => {
+  coarsePointer.value = globalThis.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+  window.addEventListener("keyup", releaseSpace);
+});
 onBeforeUnmount(() => window.removeEventListener("keyup", releaseSpace));
 defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
 </script>
@@ -891,24 +988,49 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             pointer-events="none"
           />
         </template>
+        <template v-for="handle in insertPointHandles" :key="`insert-${handle.index}`">
+          <circle
+            :data-insert-point="handle.index"
+            :cx="handle.point.x"
+            :cy="handle.point.y"
+            :r="handleHitRadius * 0.86"
+            fill="transparent"
+            pointer-events="all"
+            class="selection-insert-hit"
+          />
+          <circle
+            :cx="handle.point.x"
+            :cy="handle.point.y"
+            :r="radius * 0.82"
+            fill="#157b79"
+            stroke="white"
+            :stroke-width="radius / 3"
+            pointer-events="none"
+          />
+          <path
+            :d="`M ${handle.point.x - radius * 0.42} ${handle.point.y} H ${handle.point.x + radius * 0.42} M ${handle.point.x} ${handle.point.y - radius * 0.42} V ${handle.point.y + radius * 0.42}`"
+            stroke="white"
+            :stroke-width="Math.max(1, radius / 4)"
+            stroke-linecap="round"
+            pointer-events="none"
+          />
+        </template>
         <template
-          v-for="(point, index) in ['freehand', 'curve'].includes(singleSelected.type)
-            ? []
-            : singleSelected.points"
-          :key="index"
+          v-for="handle in editablePointHandles"
+          :key="handle.index"
         >
           <circle
-            :data-handle="index"
-            :cx="point.x"
-            :cy="point.y"
+            :data-handle="handle.index"
+            :cx="handle.point.x"
+            :cy="handle.point.y"
             :r="handleHitRadius"
             fill="transparent"
             pointer-events="all"
             class="selection-handle-hit"
           />
           <circle
-            :cx="point.x"
-            :cy="point.y"
+            :cx="handle.point.x"
+            :cy="handle.point.y"
             :r="radius"
             fill="white"
             stroke="#157b79"

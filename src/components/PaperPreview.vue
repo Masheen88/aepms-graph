@@ -33,8 +33,17 @@ defineProps({ pages: Array });
           <g
             :clip-path="mark.graph ? `url(#preview-grid-${index})` : undefined"
           >
+            <image
+              v-if="mark.kind === 'image'"
+              :x="mark.x"
+              :y="mark.y"
+              :width="mark.width"
+              :height="mark.height"
+              href="/company-logo.png"
+              preserveAspectRatio="xMidYMid meet"
+            />
             <rect
-              v-if="mark.kind === 'rect'"
+              v-else-if="mark.kind === 'rect'"
               :x="mark.x"
               :y="mark.y"
               :width="mark.width"

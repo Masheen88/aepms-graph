@@ -26,7 +26,7 @@ const marks = computed(() =>
       v-if="item.points.length === 1"
       :cx="item.points[0].x"
       :cy="item.points[0].y"
-      :r="Math.max(15, item.fontSize)"
+      :r="Math.max(42, item.fontSize * 1.4)"
       fill="transparent"
       pointer-events="all"
     />
@@ -34,10 +34,11 @@ const marks = computed(() =>
       <template v-if="p.kind === 'path'">
         <path
           :d="svgPath(p)"
-          fill="none"
+          :fill="p.closed ? 'transparent' : 'none'"
           stroke="transparent"
-          :stroke-width="Math.max(p.width, 18)"
-          pointer-events="stroke"
+          :stroke-width="Math.max(p.width, 36)"
+          vector-effect="non-scaling-stroke"
+          :pointer-events="p.closed ? 'all' : 'stroke'"
         />
         <path
           :d="svgPath(p)"

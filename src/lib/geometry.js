@@ -85,17 +85,108 @@ function rotatedShape(center, points, degrees = 0) {
   );
 }
 
+export function resolvedCornerStyle(item) {
+  // v1.3 stored rounded rectangles as cornerRadius only. Treat those older objects
+  // as rounded until the user explicitly chooses a corner style in the new editor.
+  if (item.cornerStyle) return item.cornerStyle;
+  return item.type === "rect" && Number(item.cornerRadius || 0) > 0 ? "round" : "square";
+}
+
+function quadraticPoint(start, control, end, t) {
+  const inverse = 1 - t;
+  return {
+    x: inverse * inverse * start.x + 2 * inverse * t * control.x + t * t * end.x,
+    y: inverse * inverse * start.y + 2 * inverse * t * control.y + t * t * end.y,
+  };
+}
+
+function treatedCorner(points, index, closed, style, size) {
+  const current = points[index];
+  if (style === "square" || size < 0.5) return [current];
+  if (!closed && (index === 0 || index === points.length - 1)) return [current];
+
+  const previous = points[(index - 1 + points.length) % points.length];
+  const next = points[(index + 1) % points.length];
+  const prevLength = Math.hypot(previous.x - current.x, previous.y - current.y);
+  const nextLength = Math.hypot(next.x - current.x, next.y - current.y);
+  if (prevLength < 0.01 || nextLength < 0.01) return [current];
+
+  const prevX = (previous.x - current.x) / prevLength;
+  const prevY = (previous.y - current.y) / prevLength;
+  const nextX = (next.x - current.x) / nextLength;
+  const nextY = (next.y - current.y) / nextLength;
+  const cross = prevX * nextY - prevY * nextX;
+  const dot = prevX * nextX + prevY * nextY;
+  // A straight segment has no visible corner to round/bevel. Keeping the original
+  // point also prevents dense collinear imported paths from gaining tiny notches.
+  if (Math.abs(cross) < 0.0001 && dot < -0.999) return [current];
+
+  // Never let one corner consume its neighboring segments. The user-entered size is
+  // a tangent setback; it is snapped by the editor before being stored.
+  const offset = Math.min(size, prevLength * 0.45, nextLength * 0.45);
+  if (offset < 0.5) return [current];
+  const incoming = {
+    x: current.x + prevX * offset,
+    y: current.y + prevY * offset,
+  };
+  const outgoing = {
+    x: current.x + nextX * offset,
+    y: current.y + nextY * offset,
+  };
+  if (style === "bevel") return [incoming, outgoing];
+
+  // Sample a quadratic fillet. It stays vector-based in the editor/PDF and gives a
+  // predictable radiused-looking corner for arbitrary wall angles without SVG-only arcs.
+  const steps = clamp(Math.ceil(offset / 4), 3, 10);
+  return Array.from({ length: steps + 1 }, (_, step) =>
+    quadraticPoint(incoming, current, outgoing, step / steps),
+  );
+}
+
+export function corneredPathPoints(item) {
+  const points = item.points || [];
+  if (points.length < 3 || !["rect", "outline", "line"].includes(item.type)) return points;
+  const style = resolvedCornerStyle(item);
+  const size = clamp(Number(item.cornerRadius || 0), 0, 120);
+  if (style === "square" || size < 0.5) return points;
+  const closed = item.type === "rect" || item.closed === true;
+  return points.flatMap((_, index) => treatedCorner(points, index, closed, style, size));
+}
+
+function rectBasePolygon(item) {
+  const b = bounds(item);
+  return [
+    { x: b.x, y: b.y },
+    { x: b.right, y: b.y },
+    { x: b.right, y: b.bottom },
+    { x: b.x, y: b.bottom },
+  ];
+}
+
+function rectanglePolygon(item) {
+  // Rectangles store only opposite corners for fast resizing. Expand them to four
+  // vertices before applying the same round/bevel logic used by editable outlines.
+  const expanded = { ...item, points: rectBasePolygon(item), closed: true };
+  return corneredPathPoints(expanded);
+}
+
+function ellipsePolygon(item, steps = 48) {
+  const b = bounds(item);
+  const cx = (b.x + b.right) / 2;
+  const cy = (b.y + b.bottom) / 2;
+  const rx = Math.max(0.5, (b.right - b.x) / 2);
+  const ry = Math.max(0.5, (b.bottom - b.y) / 2);
+  return Array.from({ length: steps }, (_, index) => {
+    const angle = (index / steps) * Math.PI * 2;
+    return { x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry };
+  });
+}
+
 function polygonFor(item) {
-  if (item.type === "rect") {
-    const b = bounds(item);
-    return [
-      { x: b.x, y: b.y },
-      { x: b.right, y: b.y },
-      { x: b.right, y: b.bottom },
-      { x: b.x, y: b.bottom },
-    ];
-  }
-  return item.closed && ["outline", "curve", "freehand"].includes(item.type) ? item.points : [];
+  if (item.type === "rect") return rectanglePolygon(item);
+  if (item.type === "ellipse") return ellipsePolygon(item);
+  if (item.closed && item.type === "outline") return corneredPathPoints(item);
+  return item.closed && ["curve", "freehand"].includes(item.type) ? item.points : [];
 }
 
 function hatchSegments(polygon, a, b, spacing) {
@@ -141,9 +232,13 @@ function addPattern(result, item, polygon) {
     segments.forEach((points) =>
       result.push({ kind: "path", points, closed: false, color: item.color, width }),
     );
-  // x + y = c produces one diagonal direction; crosshatch adds the opposite.
-  add(hatchSegments(polygon, 1, 1, spacing));
+  // x + y = c produces one diagonal direction; the other combinations add
+  // crosshatch or simple horizontal/vertical field marks.
+  if (["diagonal", "crosshatch"].includes(item.pattern))
+    add(hatchSegments(polygon, 1, 1, spacing));
   if (item.pattern === "crosshatch") add(hatchSegments(polygon, 1, -1, spacing));
+  if (item.pattern === "horizontal") add(hatchSegments(polygon, 0, 1, spacing));
+  if (item.pattern === "vertical") add(hatchSegments(polygon, 1, 0, spacing));
 }
 
 function measurementText(result, item, points, closed, options) {
@@ -202,18 +297,32 @@ export function primitives(item, options = {}) {
         rotate,
       });
   };
-  if (item.type === "rect") {
+  if (["rect", "ellipse"].includes(item.type)) {
     const polygon = polygonFor(item),
       b = bounds(item);
     addPattern(result, item, polygon);
-    path(polygon, true);
-    measurementText(result, item, polygon, true, options);
+    path(polygon, true, item.type === "ellipse");
+    // Keep dimension labels useful on rounded/elliptical areas by reporting the
+    // bounding width and height instead of labeling every sampled curve segment.
+    measurementText(
+      result,
+      item,
+      [
+        { x: b.x, y: b.y },
+        { x: b.right, y: b.y },
+        { x: b.right, y: b.bottom },
+        { x: b.x, y: b.bottom },
+      ],
+      true,
+      options,
+    );
     if (showGeometryLabel)
       text(item.text, (b.x + b.right) / 2, (b.y + b.bottom) / 2);
   } else if (["outline", "line", "freehand", "curve"].includes(item.type)) {
     const polygon = polygonFor(item);
+    const renderedPoints = ["outline", "line"].includes(item.type) ? corneredPathPoints(item) : p;
     addPattern(result, item, polygon);
-    path(p, item.closed, item.type === "curve");
+    path(renderedPoints, item.closed, item.type === "curve");
     if (["outline", "line", "curve"].includes(item.type))
       measurementText(result, item, p, item.closed, options);
     const b = bounds(item);

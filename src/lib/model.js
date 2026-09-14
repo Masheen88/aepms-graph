@@ -103,7 +103,7 @@ const graphStyleSchema = z
 export const itemSchema = z
   .object({
     id: z.string().uuid(),
-    type: z.enum(["outline", "line", "curve", "freehand", "rect", "label", "symbol"]),
+    type: z.enum(["outline", "line", "curve", "freehand", "rect", "ellipse", "label", "symbol"]),
     points: z.array(point).min(1).max(6000),
     text: z.string().max(60),
     symbol: z.string().max(40).default(""),
@@ -113,8 +113,12 @@ export const itemSchema = z
     fontSize: z.number().min(6).max(72),
     closed: z.boolean(),
     // Patterns are stored on the object so the editor, preview, backup and PDF agree.
-    pattern: z.enum(["none", "diagonal", "crosshatch"]).default("none"),
+    pattern: z.enum(["none", "diagonal", "crosshatch", "horizontal", "vertical"]).default("none"),
     patternSpacing: z.number().min(8).max(50).default(16),
+    // Corner treatment works on rectangles and editable line/outline vertices.
+    // cornerStyle stays optional so older v1.3 backups with only cornerRadius remain rounded.
+    cornerStyle: z.enum(["square", "round", "bevel"]).optional(),
+    cornerRadius: z.number().min(0).max(120).default(0),
     // Structural labels can be hidden without deleting their text, so they can be restored later.
     showLabel: z.boolean().default(true),
     // Measurements can be turned off for a single object while remaining on elsewhere.
@@ -126,15 +130,15 @@ export const itemSchema = z
     const min =
       item.type === "outline" && item.closed
         ? 3
-        : ["outline", "line", "curve", "freehand", "rect"].includes(item.type)
+        : ["outline", "line", "curve", "freehand", "rect", "ellipse"].includes(item.type)
           ? 2
           : 1;
     if (item.points.length < min)
       ctx.addIssue({ code: "custom", message: "Drawing has too few points" });
-    if (item.type === "rect" && item.points.length !== 2)
+    if (["rect", "ellipse"].includes(item.type) && item.points.length !== 2)
       ctx.addIssue({
         code: "custom",
-        message: "A rectangle needs two corners",
+        message: "This area shape needs two corners",
       });
   });
 export const reportSchema = z
@@ -212,40 +216,18 @@ export function newItem(type, points, overrides = {}) {
     closed: false,
     pattern: "none",
     patternSpacing: 16,
+    cornerStyle: "square",
+    cornerRadius: 0,
     showLabel: true,
     showMeasurements: true,
     rotation: 0,
     ...overrides,
   };
 }
-export function statementErrors(report) {
-  const errors = [];
-  const active = ["inspector", "control"].filter((key) => {
-    const s = report[key];
-    return (
-      s.notes.trim() ||
-      s.name.trim() ||
-      s.certificate.trim() ||
-      s.date ||
-      s.signature.length
-    );
-  });
-  if (!active.length)
-    return [
-      "Complete the inspector or control technician statement before exporting.",
-    ];
-  for (const key of active) {
-    const title = key === "inspector" ? "Inspector" : "Control technician";
-    for (const [field, label] of [
-      ["notes", "notes"],
-      ["name", "signed name"],
-      ["certificate", "certification number"],
-      ["date", "date"],
-    ]) {
-      if (!report[key][field].trim()) errors.push(`${title}: add ${label}.`);
-    }
-  }
-  return errors;
+export function statementErrors() {
+  // Inspector and control statements are intentionally optional. Field users often need
+  // to save or export the graph before either section is applicable or complete.
+  return [];
 }
 export function readableDate(value) {
   if (!value) return "";
