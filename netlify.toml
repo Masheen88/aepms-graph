@@ -1,0 +1,27 @@
+# netlify.toml
+#
+# Netlify hosts the browser/PWA portion of Termite Fieldbook.
+# The optional report API/database is intentionally not deployed here yet.
+
+[build]
+  command = "pnpm exec vite build"
+  publish = "dist/client"
+
+[build.environment]
+  # The project uses node:sqlite in its Vite development tooling,
+  # so keep Netlify on the Node version expected by the project.
+  NODE_VERSION = "22.13.0"
+
+# Service workers should be checked for updates rather than cached indefinitely.
+[[headers]]
+  for = "/sw.js"
+
+  [headers.values]
+    Cache-Control = "no-cache"
+
+# Explicit manifest content type for the installable web app.
+[[headers]]
+  for = "/manifest.webmanifest"
+
+  [headers.values]
+    Content-Type = "application/manifest+json; charset=utf-8"
