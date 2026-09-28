@@ -14,6 +14,7 @@ import {
   constrained,
   corneredPathPoints,
   primitives,
+  primitivesForItems,
   resizePoints,
   resolvedCornerStyle,
   snapStepForScale,
@@ -124,6 +125,102 @@ assert.equal(
   false,
   "Per-object measurement toggles must suppress length text",
 );
+const hiddenOne = clone(patterned);
+hiddenOne.hiddenMeasurements = [0];
+const hiddenOneMarks = primitives(hiddenOne, {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+assert.equal(
+  hiddenOneMarks.some((mark) => mark.measurement && mark.measurementIndex === 0),
+  false,
+  "A single crowded dimension must be hideable without disabling the object",
+);
+const oldRevision = clone(report);
+oldRevision.schemaRevision = 2;
+delete oldRevision.items[0].hiddenMeasurements;
+delete oldRevision.items[0].measurementSideOverrides;
+const migrated = reportSchema.parse(oldRevision);
+assert.equal(migrated.schemaRevision, 6, "Older saves must normalize to schema revision 6");
+assert.deepEqual(migrated.items[0].hiddenMeasurements, []);
+assert.deepEqual(migrated.items[0].measurementSideOverrides, []);
+assert.deepEqual(migrated.items[0].measurementOffsets, [], "Older manual dimension drags must reset to automatic layout");
+assert.equal(migrated.graphStyle.measurementPlacement, "smart");
+assert.equal(migrated.graphStyle.measurementOrientation, "horizontal");
+assert.equal(migrated.graphStyle.measurementDetail, "simplified");
+assert.equal(migrated.graphStyle.measurementCrowding, "clean");
+
+const sparseRevision = clone(report);
+sparseRevision.schemaRevision = 6;
+sparseRevision.items[0].measurementOffsets = [];
+sparseRevision.items[0].measurementOffsets.length = 3;
+sparseRevision.items[0].measurementOffsets[2] = { x: 4, y: 5 };
+sparseRevision.items[0].measurementSideOverrides = [null, null, "opposite"];
+sparseRevision.items[0].pointLinks = [null, "corner-link"];
+const repairedSparse = reportSchema.parse(sparseRevision);
+assert.deepEqual(
+  repairedSparse.items[0].measurementOffsets.slice(0, 2),
+  [{ x: 0, y: 0 }, { x: 0, y: 0 }],
+  "Sparse/null measurement offsets must be repaired before Save/PDF export",
+);
+assert.deepEqual(repairedSparse.items[0].measurementSideOverrides.slice(0, 2), ["inherit", "inherit"]);
+assert.deepEqual(repairedSparse.items[0].pointLinks.slice(0, 2), ["", "corner-link"]);
+
+const compactBox = clone(patterned);
+compactBox.points = [{ x: 100, y: 100 }, { x: 110, y: 110 }];
+const compactBoxMarks = primitives(compactBox, {
+  feetPerSquare: 1,
+  gridUnit: "ft",
+  graphStyle: { ...report.graphStyle, measurementFontSize: 6, measurementDetail: "simplified" },
+});
+const compactBoxDimensions = compactBoxMarks.filter((mark) => mark.measurement);
+assert.equal(compactBoxDimensions.length, 2, "A rectangular box should default to width + height only");
+assert.ok(
+  compactBoxDimensions.every((mark) => mark.size <= 4.6),
+  "One-foot box dimensions should use the compact short-wall text size",
+);
+
+const overlapA = clone(patterned);
+overlapA.id = crypto.randomUUID();
+overlapA.text = "";
+const overlapB = clone(patterned);
+overlapB.id = crypto.randomUUID();
+overlapB.text = "";
+const smartEntries = primitivesForItems([overlapA, overlapB], {
+  feetPerSquare: report.feetPerSquare,
+  gridUnit: report.gridUnit,
+  graphStyle: report.graphStyle,
+});
+const smartA = smartEntries[0].marks.filter((mark) => mark.measurement);
+const smartB = smartEntries[1].marks.filter((mark) => mark.measurement);
+assert.ok(smartA.length > 0, "The first overlapping object must retain dimensions");
+assert.equal(
+  smartB.length,
+  0,
+  "Exact duplicate geometry must not stack duplicate dimension text",
+);
+
+const nearbyLineA = clone(report.items.find((item) => item.type === "line"));
+nearbyLineA.id = crypto.randomUUID();
+nearbyLineA.points = [{ x: 100, y: 100 }, { x: 120, y: 100 }];
+nearbyLineA.text = "";
+const nearbyLineB = clone(nearbyLineA);
+nearbyLineB.id = crypto.randomUUID();
+nearbyLineB.points = [{ x: 100, y: 106 }, { x: 120, y: 106 }];
+const nearbyEntries = primitivesForItems([nearbyLineA, nearbyLineB], {
+  feetPerSquare: 1,
+  gridUnit: "ft",
+  graphStyle: { ...report.graphStyle, measurementCrowding: "all", measurementPlacement: "smart" },
+});
+for (const mark of nearbyEntries.flatMap((entry) => entry.marks).filter((mark) => mark.measurement)) {
+  const offset = mark.measurementAutoOffset || { x: 0, y: 0 };
+  assert.ok(
+    Math.hypot(offset.x, offset.y) <= 7,
+    "Smart measurement layout must stay close enough to the wall that ownership is obvious",
+  );
+}
+
 const rotatedDoor = primitives(
   clone(report.items.find((item) => item.symbol === "door")),
   { feetPerSquare: report.feetPerSquare, gridUnit: report.gridUnit, graphStyle: report.graphStyle },
@@ -284,5 +381,5 @@ assert.equal(
   1950,
 );
 console.log(
-  "PASS: validation, optional technician statements, company logo output, 1-unit default scale, scale-aware snapping, resizing, rounded/beveled/oval areas, hidden labels, per-object measurements, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
+  "PASS: validation, optional technician statements, company logo output, 1-unit default scale, scale-aware snapping, resizing, rounded/beveled/oval areas, hidden labels, per-object/per-segment measurements, schema migration, smart dimension layout, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
 );

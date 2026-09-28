@@ -1,10 +1,9 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
-// This plugin is implemented locally in the Android project by
-// scripts/install-android-pdf-saver.mjs. Keeping the native bridge tiny lets the
-// web app use Android's real ACTION_CREATE_DOCUMENT picker without adding a
-// third-party storage abstraction around the PDF bytes.
-const PdfSaver = registerPlugin("PdfSaver");
+// The native plugin is generated locally by scripts/install-android-pdf-saver.mjs.
+// The historical plugin name stays PdfSaver so existing Android projects continue
+// to work, but the bridge now saves any exportable file type, not only PDFs.
+const NativeFileSaver = registerPlugin("PdfSaver");
 
 /**
  * Returns true only inside the installed Capacitor Android application.
@@ -14,10 +13,9 @@ export function canUseNativeAndroidFileSave() {
 }
 
 /**
- * Convert PDF bytes into bridge-safe base64 without spreading the complete
- * Uint8Array into one function call. Large inspection PDFs can easily exceed
- * the JavaScript engine's argument limit when String.fromCharCode(...bytes) is
- * used on the whole document at once.
+ * Convert arbitrary bytes into bridge-safe base64 without spreading the complete
+ * Uint8Array into one function call. PDF and JSON backup files can both become
+ * large enough to exceed the JavaScript engine's argument limit.
  */
 function bytesToBase64(bytes) {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -31,14 +29,47 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+function textToBytes(text) {
+  return new TextEncoder().encode(String(text));
+}
+
 /**
- * Open Android's system "Create document" picker and write the generated PDF
- * to the exact content URI selected by the inspector.
+ * Open Android's system Create document picker and write arbitrary bytes to the
+ * selected content URI.
  */
-export async function savePdfWithNativeAndroidPicker(bytes, filename) {
-  return PdfSaver.savePdf({
+export async function saveFileWithNativeAndroidPicker(bytes, filename, contentType) {
+  return NativeFileSaver.saveFile({
     filename,
-    contentType: "application/pdf",
+    contentType,
     base64Data: bytesToBase64(bytes),
   });
+}
+
+/**
+ * Save arbitrary bytes directly into Android's public Downloads collection.
+ */
+export async function saveFileToAndroidDownloads(bytes, filename, contentType) {
+  return NativeFileSaver.saveFileToDownloads({
+    filename,
+    contentType,
+    base64Data: bytesToBase64(bytes),
+  });
+}
+
+export function saveTextWithNativeAndroidPicker(text, filename, contentType = "application/json") {
+  return saveFileWithNativeAndroidPicker(textToBytes(text), filename, contentType);
+}
+
+export function saveTextToAndroidDownloads(text, filename, contentType = "application/json") {
+  return saveFileToAndroidDownloads(textToBytes(text), filename, contentType);
+}
+
+// PDF-specific names remain as small wrappers so existing call sites and native
+// projects stay backward compatible.
+export function savePdfWithNativeAndroidPicker(bytes, filename) {
+  return saveFileWithNativeAndroidPicker(bytes, filename, "application/pdf");
+}
+
+export function savePdfToAndroidDownloads(bytes, filename) {
+  return saveFileToAndroidDownloads(bytes, filename, "application/pdf");
 }

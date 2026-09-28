@@ -1,6 +1,28 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Plus, Minus, Maximize, Check, X, Crosshair, Hand, MousePointer2 } from "lucide-vue-next";
+import {
+  Plus,
+  Minus,
+  Maximize,
+  Check,
+  X,
+  Crosshair,
+  Hand,
+  MousePointer2,
+  Trash2,
+  Copy,
+  EyeOff,
+  RotateCcw,
+  FlipHorizontal2,
+  Unlink,
+  CircleEllipsis,
+  Ruler,
+  ScanLine,
+  Square,
+  Type,
+  MoveUpRight,
+  Grid2X2,
+} from "lucide-vue-next";
 import ShapeItem from "./ShapeItem.vue";
 import { GRID, clone, newItem } from "../lib/model.js";
 import {
@@ -11,6 +33,7 @@ import {
   bounds,
   rotatePoint,
   snapStepForScale,
+  primitivesForItems,
 } from "../lib/geometry.js";
 
 const props = defineProps({
@@ -34,8 +57,10 @@ const emit = defineEmits([
   "change",
   "select-tool",
   "position",
+  "quick-action",
 ]);
-const svg = ref(null),
+const wrap = ref(null),
+  svg = ref(null),
   view = ref({ x: -35, y: -35, w: 870, h: 890 }),
   drawing = ref(null),
   pending = ref([]),
@@ -43,7 +68,9 @@ const svg = ref(null),
   lineAnchor = ref(null),
   quickPan = ref(false),
   marquee = ref(null),
-  coarsePointer = ref(false);
+  coarsePointer = ref(false),
+  activeVertexIndex = ref(null),
+  radialMenu = ref(null);
 const selectedSet = computed(() => new Set(props.selectedIds || []));
 const selectedItems = computed(() =>
   props.items.filter((item) => selectedSet.value.has(item.id)),
@@ -54,11 +81,22 @@ const singleSelected = computed(() =>
 const zoom = computed(() => Math.round((870 / view.value.w) * 100));
 const snapStep = computed(() => snapStepForScale(props.feetPerSquare));
 const showSnapSubdivision = computed(() => snapStep.value < GRID.step - 0.001);
+const laidOutMarks = computed(() => {
+  const entries = primitivesForItems(props.items, {
+    feetPerSquare: props.feetPerSquare,
+    gridUnit: props.gridUnit,
+    graphStyle: props.graphStyle,
+  });
+  return new Map(entries.map((entry) => [entry.id, entry.marks]));
+});
 const pointers = new Map();
 let action = null,
   gesture = null,
   before = null,
-  space = false;
+  space = false,
+  longPressTimer = null,
+  pressState = null,
+  longPressPointerId = null;
 // Keep the visible edit handles compact while giving touch users a larger invisible grab target.
 const radius = computed(() => ((coarsePointer.value ? 9 : 6) * view.value.w) / 870);
 const handleHitRadius = computed(() => ((coarsePointer.value ? 54 : 18) * view.value.w) / 870);
@@ -79,6 +117,14 @@ const groupBounds = computed(() => mergeBounds(selectedItems.value));
 const selectedBoxes = computed(() =>
   selectedItems.value.map((item) => ({ id: item.id, ...bounds(item) })),
 );
+function denseArrayValue(source, index, value, filler) {
+  // Never create sparse arrays. JSON serializes sparse slots as null, which caused
+  // older drafts to fail schema validation during Save and unsaved PDF export.
+  const next = Array.isArray(source) ? [...source] : [];
+  while (next.length <= index) next.push(typeof filler === "function" ? filler() : filler);
+  next[index] = value;
+  return next;
+}
 const resizeHandles = computed(() => {
   if (!selectedBounds.value || singleSelected.value?.points.length < 2) return [];
   const b = selectedBounds.value;
@@ -169,12 +215,332 @@ function insertPointAtSegment(segmentIndex) {
   const midpoint = insertionPoint(start, end);
   if (!midpoint) return;
   const points = clone(item.points);
+  const pointLinks = clone(item.pointLinks || []);
   points.splice(segmentIndex + 1, 0, midpoint);
+  pointLinks.splice(segmentIndex + 1, 0, "");
   const items = props.items.map((entry) =>
-    entry.id === item.id ? { ...entry, points } : entry,
+    entry.id === item.id
+      ? {
+          ...entry,
+          points,
+          pointLinks,
+          measurementOffsets: [],
+          hiddenMeasurements: [],
+          measurementSideOverrides: [],
+          measurementDistance: 0,
+          measurementSide: "normal",
+        }
+      : entry,
+  );
+  activeVertexIndex.value = segmentIndex + 1;
+  updateItems(items);
+  commit(items);
+}
+
+function minimumPointCount(item) {
+  if (!item) return 0;
+  return item.type === "outline" && item.closed ? 3 : 2;
+}
+function canDeletePoint(item, index) {
+  return Boolean(
+    item &&
+      ["outline", "line"].includes(item.type) &&
+      item.points[index] &&
+      item.points.length > minimumPointCount(item),
+  );
+}
+function deletePoint(itemId, index) {
+  const item = props.items.find((entry) => entry.id === itemId);
+  if (!canDeletePoint(item, index)) return;
+  const points = clone(item.points);
+  const pointLinks = clone(item.pointLinks || []);
+  points.splice(index, 1);
+  pointLinks.splice(index, 1);
+  const items = props.items.map((entry) =>
+    entry.id === itemId
+      ? {
+          ...entry,
+          points,
+          pointLinks,
+          // Segment indexes change when a vertex disappears, so clear only annotation
+          // layout metadata rather than risking stale offsets on the wrong wall.
+          measurementOffsets: [],
+          hiddenMeasurements: [],
+          measurementSideOverrides: [],
+        }
+      : entry,
+  );
+  activeVertexIndex.value = null;
+  updateItems(items);
+  commit(items);
+}
+function releasePointWeld(itemId, index) {
+  const item = props.items.find((entry) => entry.id === itemId);
+  if (!item?.pointLinks?.[index]) return;
+  const pointLinks = clone(item.pointLinks || []);
+  pointLinks[index] = "";
+  const items = props.items.map((entry) =>
+    entry.id === itemId ? { ...entry, pointLinks } : entry,
   );
   updateItems(items);
   commit(items);
+}
+function hideMeasurement(itemId, index) {
+  const items = props.items.map((entry) => {
+    if (entry.id !== itemId) return entry;
+    const hiddenMeasurements = [...new Set([...(entry.hiddenMeasurements || []), index])];
+    return { ...entry, hiddenMeasurements };
+  });
+  updateItems(items);
+  commit(items);
+}
+function resetMeasurement(itemId, index) {
+  const items = props.items.map((entry) => {
+    if (entry.id !== itemId) return entry;
+    const measurementOffsets = denseArrayValue(
+      entry.measurementOffsets,
+      index,
+      { x: 0, y: 0 },
+      () => ({ x: 0, y: 0 }),
+    );
+    const measurementSideOverrides = denseArrayValue(
+      entry.measurementSideOverrides,
+      index,
+      "inherit",
+      "inherit",
+    );
+    return {
+      ...entry,
+      measurementOffsets,
+      measurementSideOverrides,
+      hiddenMeasurements: (entry.hiddenMeasurements || []).filter((value) => value !== index),
+    };
+  });
+  updateItems(items);
+  commit(items);
+}
+function flipMeasurement(itemId, index) {
+  const items = props.items.map((entry) => {
+    if (entry.id !== itemId) return entry;
+    const current = entry.measurementSideOverrides?.[index] === "inherit" || !entry.measurementSideOverrides?.[index]
+      ? entry.measurementSide || "normal"
+      : entry.measurementSideOverrides[index];
+    const overrides = denseArrayValue(
+      entry.measurementSideOverrides,
+      index,
+      current === "opposite" ? "normal" : "opposite",
+      "inherit",
+    );
+    return {
+      ...entry,
+      measurementSideOverrides: overrides,
+      hiddenMeasurements: (entry.hiddenMeasurements || []).filter((value) => value !== index),
+    };
+  });
+  updateItems(items);
+  commit(items);
+}
+function toggleSelectionMeasurements() {
+  if (!selectedItems.value.length) return;
+  const measurable = selectedItems.value.filter((item) =>
+    ["rect", "ellipse", "outline", "line", "curve"].includes(item.type),
+  );
+  if (!measurable.length) return;
+  const next = measurable.some((item) => item.showMeasurements === false);
+  const ids = new Set(measurable.map((item) => item.id));
+  const items = props.items.map((item) =>
+    ids.has(item.id) ? { ...item, showMeasurements: next } : item,
+  );
+  updateItems(items);
+  commit(items);
+}
+function resetSelectionAnnotations() {
+  if (!selectedItems.value.length) return;
+  const ids = new Set(selectedItems.value.map((item) => item.id));
+  const items = props.items.map((item) =>
+    ids.has(item.id)
+      ? {
+          ...item,
+          labelOffset: { x: 0, y: 0 },
+          measurementOffsets: [],
+          hiddenMeasurements: [],
+          measurementSideOverrides: [],
+        }
+      : item,
+  );
+  updateItems(items);
+  commit(items);
+}
+
+const activeVertexHandle = computed(() => {
+  const item = singleSelected.value;
+  const index = activeVertexIndex.value;
+  if (!item || index === null || !canDeletePoint(item, index)) return null;
+  return { itemId: item.id, index, point: item.points[index] };
+});
+
+const radialActions = computed(() => {
+  const context = radialMenu.value?.context;
+  if (!context) return [];
+  if (context.kind === "point") {
+    const item = props.items.find((entry) => entry.id === context.itemId);
+    const actions = [];
+    if (canDeletePoint(item, context.index))
+      actions.push({ id: "delete-point", label: "Delete point", icon: Trash2, danger: true });
+    const canInsert = item && ["outline", "line"].includes(item.type) &&
+      (context.index < item.points.length - 1 || item.closed);
+    if (canInsert) actions.push({ id: "insert-point", label: "Add after", icon: Plus });
+    if (item?.pointLinks?.[context.index])
+      actions.push({ id: "release-point", label: "Release corner", icon: Unlink });
+    return actions;
+  }
+  if (context.kind === "measurement") {
+    return [
+      { id: "hide-measurement", label: "Hide", icon: EyeOff },
+      { id: "reset-measurement", label: "Auto", icon: RotateCcw },
+      { id: "flip-measurement", label: "Flip side", icon: FlipHorizontal2 },
+    ];
+  }
+  if (context.kind === "item") {
+    const measurable = selectedItems.value.some((item) =>
+      ["rect", "ellipse", "outline", "line", "curve"].includes(item.type),
+    );
+    const actions = [
+      { id: "duplicate-selection", label: "Copy", icon: Copy },
+      { id: "delete-selection", label: "Delete", icon: Trash2, danger: true },
+      { id: "reset-annotations", label: "Reset layout", icon: RotateCcw },
+    ];
+    if (measurable) {
+      const measurableItems = selectedItems.value.filter((item) =>
+        ["rect", "ellipse", "outline", "line", "curve"].includes(item.type),
+      );
+      const allShown = measurableItems.every((item) => item.showMeasurements !== false);
+      actions.splice(2, 0, {
+        id: "toggle-measurements",
+        label: allShown ? "Dims off" : "Dims on",
+        icon: Ruler,
+      });
+    }
+    const straightLines = selectedItems.value.filter(
+      (item) => item.type === "line" && item.points?.length === 2,
+    );
+    if (straightLines.length >= 2)
+      actions.splice(actions.length - 1, 0, {
+        id: "combine-lines",
+        label: "Combine walls",
+        icon: ScanLine,
+      });
+    if (straightLines.length === 1 && selectedItems.value.length === 1)
+      actions.splice(actions.length - 1, 0, {
+        id: "split-line",
+        label: "Split length",
+        icon: Plus,
+      });
+    return actions;
+  }
+  if (context.kind === "canvas") {
+    return [
+      { id: "tool:outline", label: "Outline", icon: ScanLine },
+      { id: "tool:line", label: "Line", icon: MoveUpRight },
+      { id: "tool:rect", label: "Area", icon: Square },
+      { id: "tool:hatch", label: "Hatch", icon: Grid2X2 },
+      { id: "tool:label", label: "Label", icon: Type },
+      { id: "tool:pan", label: "Pan", icon: Hand },
+      { id: "tool:select", label: "Select", icon: MousePointer2 },
+      { id: "reset-all-measurements", label: "Reflow dims", icon: RotateCcw },
+    ];
+  }
+  return [];
+});
+
+function radialButtonStyle(index, total) {
+  const start = -Math.PI / 2;
+  const angle = start + (Math.PI * 2 * index) / Math.max(1, total);
+  const distance = total > 5 ? 88 : 80;
+  const dx = Math.cos(angle) * distance;
+  const dy = Math.sin(angle) * distance;
+  return { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))` };
+}
+function clearLongPress() {
+  if (longPressTimer) clearTimeout(longPressTimer);
+  longPressTimer = null;
+  pressState = null;
+}
+function closeRadial() {
+  radialMenu.value = null;
+}
+function openRadial(clientX, clientY, context) {
+  const rect = wrap.value?.getBoundingClientRect();
+  if (!rect) return;
+  // Keep the whole ring inside the canvas on phones so edge vertices are still usable.
+  radialMenu.value = {
+    left: clamp(clientX - rect.left, 102, Math.max(102, rect.width - 102)),
+    top: clamp(clientY - rect.top, 112, Math.max(112, rect.height - 112)),
+    context,
+  };
+}
+function scheduleLongPress(event, context) {
+  if (!["touch", "pen"].includes(event.pointerType)) return;
+  clearLongPress();
+  pressState = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    context,
+  };
+  longPressTimer = setTimeout(() => {
+    if (!pressState || pressState.pointerId !== event.pointerId) return;
+    longPressPointerId = event.pointerId;
+    // A hold is a command gesture, not the beginning of a drag. Any provisional
+    // move/handle action is discarded before the radial menu appears.
+    action = null;
+    before = null;
+    drawing.value = null;
+    marquee.value = null;
+    openRadial(pressState.clientX, pressState.clientY, pressState.context);
+    clearLongPress();
+  }, 460);
+}
+function openQuickToolRadial() {
+  const rect = wrap.value?.getBoundingClientRect();
+  if (!rect) return;
+  openRadial(rect.left + Math.min(rect.width * 0.7, rect.width - 112), rect.top + Math.min(190, rect.height * 0.38), { kind: "canvas" });
+}
+function runRadialAction(actionId) {
+  const context = radialMenu.value?.context;
+  if (!context) return;
+  if (actionId.startsWith("tool:")) {
+    emit("select-tool", actionId.slice(5));
+  } else if (actionId === "delete-point") {
+    deletePoint(context.itemId, context.index);
+  } else if (actionId === "insert-point") {
+    insertPointAtSegment(context.index);
+  } else if (actionId === "release-point") {
+    releasePointWeld(context.itemId, context.index);
+  } else if (actionId === "hide-measurement") {
+    hideMeasurement(context.itemId, context.index);
+  } else if (actionId === "reset-measurement") {
+    resetMeasurement(context.itemId, context.index);
+  } else if (actionId === "flip-measurement") {
+    flipMeasurement(context.itemId, context.index);
+  } else if (actionId === "toggle-measurements") {
+    toggleSelectionMeasurements();
+  } else if (actionId === "reset-annotations") {
+    resetSelectionAnnotations();
+  } else if (actionId === "combine-lines") {
+    emit("quick-action", "combine-lines");
+  } else if (actionId === "split-line") {
+    emit("quick-action", "split-line");
+  } else if (actionId === "duplicate-selection") {
+    emit("quick-action", "duplicate");
+  } else if (actionId === "delete-selection") {
+    emit("quick-action", "delete");
+  } else if (actionId === "reset-all-measurements") {
+    emit("quick-action", "reset-measurements");
+  }
+  closeRadial();
 }
 
 const lineChainMarker = computed(() =>
@@ -186,7 +552,7 @@ const hint = computed(
   () =>
     ({
       select:
-        "Tap an object to select it. White handles move vertices and green + handles insert points on lines/outlines. On touch, drag empty space to pan and use Multi-select to add items.",
+        "Tap an object to select it. Tap a white line/outline point to expose its delete control. Hold a point, measurement, object, or empty canvas for quick radial actions. Measurements stay attached to their walls; hold one to hide, reset, or flip it. Reflow dims restores Smart + Clean placement when a dense area becomes confusing. Labels remain freely movable. Select overlapping straight walls to combine them, or split one length into two sections.",
       outline:
         "Tap to add corners. Tap the first corner or choose Finish to close.",
       rect: "Drag from one corner to the opposite corner.",
@@ -290,6 +656,7 @@ function finishOutline(close = true) {
       closed: hatchPolygon ? pending.value.length >= 3 : close && pending.value.length >= 3,
       text: hatchPolygon ? "Hatched area" : "",
       pattern: hatchPolygon ? "diagonal" : "none",
+      showMeasurements: props.graphStyle.showMeasurements !== false,
     });
     commit([...props.items, shape]);
     setSelection([shape.id], shape.id);
@@ -310,6 +677,32 @@ function movementForGroup(group, dx, dy) {
   const allowedDy = clamp(dy, -box.y, GRID.height - box.bottom);
   return { dx: allowedDx, dy: allowedDy };
 }
+// Keep welded vertices coincident when an entire object/group changes shape or position.
+// The moved objects are authoritative for their shared link ids; linked points on
+// unselected shapes follow without requiring a destructive geometry merge.
+function propagateWeldedPoints(items, sourceIds) {
+  const ids = new Set(sourceIds);
+  const positions = new Map();
+  for (const item of items) {
+    if (!ids.has(item.id)) continue;
+    (item.pointLinks || []).forEach((linkId, index) => {
+      if (linkId && item.points[index]) positions.set(linkId, item.points[index]);
+    });
+  }
+  if (!positions.size) return items;
+  return items.map((item) => {
+    if (ids.has(item.id)) return item;
+    let changed = false;
+    const points = clone(item.points);
+    (item.pointLinks || []).forEach((linkId, index) => {
+      const position = positions.get(linkId);
+      if (!position || !points[index]) return;
+      points[index] = clone(position);
+      changed = true;
+    });
+    return changed ? { ...item, points } : item;
+  });
+}
 function intersectsSelection(item, area) {
   const box = bounds(item);
   return !(
@@ -321,10 +714,17 @@ function intersectsSelection(item, area) {
 }
 function pointerDown(event) {
   if (event.button > 0 && event.button !== 1) return;
+  if (radialMenu.value) closeRadial();
+  const directPointDelete = event.target.closest?.("[data-delete-point]");
+  if (directPointDelete && singleSelected.value) {
+    deletePoint(singleSelected.value.id, Number(directPointDelete.dataset.deletePoint));
+    return;
+  }
   svg.value.focus({ preventScroll: true });
   svg.value.setPointerCapture(event.pointerId);
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   if (pointers.size === 2) {
+    clearLongPress();
     resetInteraction(true);
     const [a, b] = [...pointers.values()];
     const mid = { clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 };
@@ -339,8 +739,29 @@ function pointerDown(event) {
   const p = gridPoint(event);
   const targetId = event.target.closest("[data-item-id]")?.dataset.itemId;
   const editControl = event.target.closest(
-    "[data-insert-point], [data-rotate], [data-resize], [data-handle]",
+    "[data-insert-point], [data-rotate], [data-resize], [data-handle], [data-measurement-index], [data-geometry-label]",
   );
+  if (props.tool === "select") {
+    const holdHandle = event.target.closest("[data-handle]");
+    const holdMeasurement = event.target.closest("[data-measurement-index]");
+    if (holdHandle && singleSelected.value) {
+      scheduleLongPress(event, {
+        kind: "point",
+        itemId: singleSelected.value.id,
+        index: Number(holdHandle.dataset.handle),
+      });
+    } else if (holdMeasurement && targetId) {
+      scheduleLongPress(event, {
+        kind: "measurement",
+        itemId: targetId,
+        index: Number(holdMeasurement.dataset.measurementIndex),
+      });
+    } else if (targetId) {
+      scheduleLongPress(event, { kind: "item", itemId: targetId });
+    } else if (["touch", "pen"].includes(event.pointerType)) {
+      scheduleLongPress(event, { kind: "canvas" });
+    }
+  }
   if (
     props.tool === "pan" ||
     quickPan.value ||
@@ -363,10 +784,36 @@ function pointerDown(event) {
       insertPointAtSegment(Number(insertPoint.dataset.insertPoint));
       return;
     }
+    const measurement = event.target.closest("[data-measurement-index]");
+    const geometryLabel = event.target.closest("[data-geometry-label]");
+    if (measurement && targetId) {
+      // Measurements stay attached to their wall. Free dragging made it too easy to
+      // create a dimension that visually belonged to the wrong segment. Tap selects
+      // the object; press/hold the value for Hide, Auto, or Flip side.
+      setSelection([targetId], targetId);
+      return;
+    }
+    if (geometryLabel && targetId) {
+      // Labels are descriptive annotations, so they remain freely movable.
+      const targetItem = props.items.find((item) => item.id === targetId);
+      if (!targetItem) return;
+      setSelection([targetId], targetId);
+      before = clone(props.items);
+      const original = clone(targetItem);
+      action = {
+        kind: "label-offset",
+        id: original.id,
+        index: null,
+        start: rawGridPoint(event),
+        original,
+      };
+      return;
+    }
     const rotate = event.target.closest("[data-rotate]");
     const resize = event.target.closest("[data-resize]");
     const handle = event.target.closest("[data-handle]");
     if ((rotate || resize || handle) && singleSelected.value) {
+      if (handle) activeVertexIndex.value = Number(handle.dataset.handle);
       before = clone(props.items);
       const original = clone(singleSelected.value);
       const box = bounds(original);
@@ -387,13 +834,20 @@ function pointerDown(event) {
 
     const additive = props.multiSelectMode || event.shiftKey || event.metaKey || event.ctrlKey;
     if (targetId) {
+      activeVertexIndex.value = null;
       if (additive) {
         toggleSelection(targetId);
         return;
       }
-      const moveIds = selectedSet.value.has(targetId) && selectedItems.value.length > 1
-        ? [...props.selectedIds]
-        : [targetId];
+      const targetItem = props.items.find((item) => item.id === targetId);
+      const groupedIds = targetItem?.groupId
+        ? props.items.filter((item) => item.groupId === targetItem.groupId).map((item) => item.id)
+        : [];
+      const moveIds = groupedIds.length > 1
+        ? groupedIds
+        : selectedSet.value.has(targetId) && selectedItems.value.length > 1
+          ? [...props.selectedIds]
+          : [targetId];
       setSelection(moveIds, targetId);
       before = clone(props.items);
       if (moveIds.length > 1) {
@@ -423,6 +877,7 @@ function pointerDown(event) {
       };
       return;
     }
+    activeVertexIndex.value = null;
     clearSelection();
     return;
   }
@@ -476,6 +931,7 @@ function pointerDown(event) {
     cornerStyle:
       props.tool === "rounded" ? "round" : props.tool === "beveled" ? "bevel" : "square",
     cornerRadius: ["rounded", "beveled"].includes(props.tool) ? 20 : 0,
+    showMeasurements: props.graphStyle.showMeasurements !== false,
   });
   if (["rect", "ellipse", "line", "garage", "crawlspace", "hatch", "rounded", "beveled"].includes(props.tool))
     drawing.value.points = [start, start];
@@ -486,6 +942,14 @@ function pointerMove(event) {
   emit("position", p);
   if (!pointers.has(event.pointerId)) return;
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (pressState?.pointerId === event.pointerId) {
+    const moved = Math.hypot(event.clientX - pressState.startX, event.clientY - pressState.startY);
+    // Keep a held finger stable until it clearly becomes a drag. This prevents tiny
+    // touch jitter from nudging a vertex/object just before its radial menu opens.
+    if (moved <= 12) return;
+    clearLongPress();
+  }
+  if (longPressPointerId === event.pointerId) return;
   if (gesture && pointers.size >= 2) {
     const [a, b] = [...pointers.values()];
     const factor = Math.hypot(a.x - b.x, a.y - b.y) / gesture.distance;
@@ -528,6 +992,18 @@ function pointerMove(event) {
     } else drawing.value.points = [action.start, p];
     return;
   }
+  if (action.kind === "label-offset") {
+    const current = rawGridPoint(event);
+    const originalOffset = action.original.labelOffset || { x: 0, y: 0 };
+    const labelOffset = {
+      x: clamp(originalOffset.x + current.x - action.start.x, -GRID.width, GRID.width),
+      y: clamp(originalOffset.y + current.y - action.start.y, -GRID.height, GRID.height),
+    };
+    updateItems(
+      props.items.map((item) => (item.id === action.id ? { ...item, labelOffset } : item)),
+    );
+    return;
+  }
   if (action.kind === "rotate") {
     let degrees = (Math.atan2(p.y - action.center.y, p.x - action.center.x) * 180) / Math.PI + 90;
     if (!event.shiftKey) degrees = Math.round(degrees / 15) * 15;
@@ -542,16 +1018,36 @@ function pointerMove(event) {
   }
   if (action.kind === "resize") {
     const points = resizePoints(action.original.points, action.corner, p);
-    updateItems(
-      props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
+    const resized = props.items.map((i) =>
+      i.id === action.id ? { ...i, points } : i,
     );
+    updateItems(propagateWeldedPoints(resized, [action.id]));
     return;
   }
   if (action.kind === "handle") {
-    const points = clone(action.original.points);
-    points[action.index] = p;
+    const linkId = action.original.pointLinks?.[action.index] || "";
     updateItems(
-      props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
+      props.items.map((item) => {
+        const points = clone(
+          item.id === action.id
+            ? action.original.points
+            : before?.find((entry) => entry.id === item.id)?.points || item.points,
+        );
+        let changed = false;
+        if (item.id === action.id) {
+          points[action.index] = p;
+          changed = true;
+        }
+        if (linkId) {
+          (item.pointLinks || []).forEach((value, index) => {
+            if (value === linkId) {
+              points[index] = p;
+              changed = true;
+            }
+          });
+        }
+        return changed ? { ...item, points } : item;
+      }),
     );
     return;
   }
@@ -561,8 +1057,25 @@ function pointerMove(event) {
       p.x - action.start.x,
       p.y - action.start.y,
     );
+    const dx = points[0].x - action.original.points[0].x;
+    const dy = points[0].y - action.original.points[0].y;
+    const linkedIds = new Set((action.original.pointLinks || []).filter(Boolean));
     updateItems(
-      props.items.map((i) => (i.id === action.id ? { ...i, points } : i)),
+      props.items.map((item) => {
+        if (item.id === action.id) return { ...item, points };
+        if (!linkedIds.size || !(item.pointLinks || []).some((id) => linkedIds.has(id))) return item;
+        const original = before?.find((entry) => entry.id === item.id) || item;
+        const linkedPoints = clone(original.points);
+        (original.pointLinks || []).forEach((id, index) => {
+          if (linkedIds.has(id)) {
+            linkedPoints[index] = constrained(
+              { x: linkedPoints[index].x + dx, y: linkedPoints[index].y + dy },
+              false,
+            );
+          }
+        });
+        return { ...item, points: linkedPoints };
+      }),
     );
     return;
   }
@@ -572,18 +1085,23 @@ function pointerMove(event) {
       p.x - action.start.x,
       p.y - action.start.y,
     );
-    updateItems(
-      props.items.map((item) => {
-        const original = action.originals.find((entry) => entry.id === item.id);
-        return original
-          ? { ...item, points: translatePoints(original.points, dx, dy) }
-          : item;
-      }),
-    );
+    const moved = props.items.map((item) => {
+      const original = action.originals.find((entry) => entry.id === item.id);
+      return original
+        ? { ...item, points: translatePoints(original.points, dx, dy) }
+        : item;
+    });
+    updateItems(propagateWeldedPoints(moved, action.ids));
   }
 }
 function pointerUp(event) {
+  clearLongPress();
   pointers.delete(event.pointerId);
+  if (longPressPointerId === event.pointerId) {
+    longPressPointerId = null;
+    resetInteraction();
+    return;
+  }
   if (gesture) {
     if (pointers.size === 0) gesture = null;
     return;
@@ -611,6 +1129,7 @@ function pointerUp(event) {
             : symbol.text,
       symbol: tool === "symbol" ? symbol.key : "",
       color: tool === "symbol" ? symbol.color : "#183b42",
+      showMeasurements: props.graphStyle.showMeasurements !== false,
     });
     commit([...props.items, shape]);
     setSelection([shape.id], shape.id);
@@ -654,6 +1173,8 @@ function pointerUp(event) {
   resetInteraction();
 }
 function pointerCancel(event) {
+  clearLongPress();
+  if (longPressPointerId === event.pointerId) longPressPointerId = null;
   pointers.delete(event.pointerId);
   if (!pointers.size) gesture = null;
   resetInteraction(true);
@@ -683,6 +1204,16 @@ function keydown(event) {
     pending.value.pop();
   }
   if (
+    props.tool === "select" &&
+    selectedItems.value.length &&
+    ["Delete", "Backspace"].includes(event.key) &&
+    !pending.value.length
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    emit("quick-action", "delete");
+  }
+  if (
     selectedItems.value.length &&
     ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
   ) {
@@ -699,20 +1230,19 @@ function keydown(event) {
       .filter((item) => ids.has(item.id))
       .map((item) => ({ id: item.id, points: clone(item.points) }));
     const { dx, dy } = movementForGroup(originals, ...delta);
-    commit(
-      props.items.map((item) =>
-        ids.has(item.id)
-          ? {
-              ...item,
-              points: translatePoints(
-                originals.find((entry) => entry.id === item.id).points,
-                dx,
-                dy,
-              ),
-            }
-          : item,
-      ),
+    const moved = props.items.map((item) =>
+      ids.has(item.id)
+        ? {
+            ...item,
+            points: translatePoints(
+              originals.find((entry) => entry.id === item.id).points,
+              dx,
+              dy,
+            ),
+          }
+        : item,
     );
+    commit(propagateWeldedPoints(moved, ids));
   }
 }
 function releaseSpace() {
@@ -740,16 +1270,26 @@ watch(
     if (!value) clearLineAnchor();
   },
 );
+watch(
+  () => props.selectedId,
+  () => {
+    activeVertexIndex.value = null;
+    closeRadial();
+  },
+);
 onMounted(() => {
   coarsePointer.value = globalThis.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
   window.addEventListener("keyup", releaseSpace);
 });
-onBeforeUnmount(() => window.removeEventListener("keyup", releaseSpace));
+onBeforeUnmount(() => {
+  clearLongPress();
+  window.removeEventListener("keyup", releaseSpace);
+});
 defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
 </script>
 
 <template>
-  <div class="graph-wrap">
+  <div ref="wrap" class="graph-wrap">
     <div class="canvas-topline">
       <span><Crosshair :size="15" /> STRUCTURE GRAPH</span
       ><span>{{ scaleLabel }}</span>
@@ -859,6 +1399,7 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             :feet-per-square="feetPerSquare"
             :grid-unit="gridUnit"
             :graph-style="graphStyle"
+            :marks="laidOutMarks.get(item.id)"
           />
         </g>
         <ShapeItem
@@ -1038,6 +1579,32 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             pointer-events="none"
           />
         </template>
+        <g v-if="activeVertexHandle" class="vertex-delete-control">
+          <circle
+            :data-delete-point="activeVertexHandle.index"
+            :cx="activeVertexHandle.point.x + radius * 2.45"
+            :cy="activeVertexHandle.point.y - radius * 2.45"
+            :r="handleHitRadius * 0.78"
+            fill="transparent"
+            pointer-events="all"
+          />
+          <circle
+            :cx="activeVertexHandle.point.x + radius * 2.45"
+            :cy="activeVertexHandle.point.y - radius * 2.45"
+            :r="radius * 1.08"
+            fill="#b9473f"
+            stroke="white"
+            :stroke-width="Math.max(1, radius / 3)"
+            pointer-events="none"
+          />
+          <path
+            :d="`M ${activeVertexHandle.point.x + radius * 1.98} ${activeVertexHandle.point.y - radius * 2.92} L ${activeVertexHandle.point.x + radius * 2.92} ${activeVertexHandle.point.y - radius * 1.98} M ${activeVertexHandle.point.x + radius * 2.92} ${activeVertexHandle.point.y - radius * 2.92} L ${activeVertexHandle.point.x + radius * 1.98} ${activeVertexHandle.point.y - radius * 1.98}`"
+            stroke="white"
+            :stroke-width="Math.max(1.2, radius / 3)"
+            stroke-linecap="round"
+            pointer-events="none"
+          />
+        </g>
       </g>
       <g v-else-if="props.selectedIds.length > 1 && tool === 'select' && groupFrame" class="selection-group-frame">
         <rect
@@ -1064,6 +1631,38 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
         stroke-width="1.5"
       />
     </svg>
+    <div
+      v-if="radialMenu && radialActions.length"
+      class="radial-menu"
+      :style="{ left: `${radialMenu.left}px`, top: `${radialMenu.top}px` }"
+      role="menu"
+      aria-label="Quick graph actions"
+      @pointerdown.stop
+    >
+      <span class="radial-menu-ring" aria-hidden="true"></span>
+      <button
+        v-for="(radialAction, index) in radialActions"
+        :key="radialAction.id"
+        type="button"
+        class="radial-action"
+        :class="{ danger: radialAction.danger }"
+        :style="radialButtonStyle(index, radialActions.length)"
+        :aria-label="radialAction.label"
+        role="menuitem"
+        @pointerdown.stop.prevent="runRadialAction(radialAction.id)"
+      >
+        <component :is="radialAction.icon" :size="19" />
+        <small>{{ radialAction.label }}</small>
+      </button>
+      <button
+        type="button"
+        class="radial-center"
+        aria-label="Close quick actions"
+        @pointerdown.stop.prevent="closeRadial"
+      >
+        <X :size="20" />
+      </button>
+    </div>
     <div
       v-if="items.length === 0 && !drawing && !pending.length"
       class="canvas-empty"
@@ -1106,6 +1705,10 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
       <button class="mobile-dock-button" :class="{ active: tool === 'select' && !quickPan }" @click="switchToSelect">
         <MousePointer2 :size="18" />
         <span>Select</span>
+      </button>
+      <button class="mobile-dock-button" @click="openQuickToolRadial">
+        <CircleEllipsis :size="18" />
+        <span>Quick</span>
       </button>
       <button class="mobile-dock-button" @click="fit">
         <Maximize :size="18" />

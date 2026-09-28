@@ -7,13 +7,18 @@ const props = defineProps({
   feetPerSquare: { type: Number, default: 1 },
   gridUnit: { type: String, default: "ft" },
   graphStyle: { type: Object, default: () => ({}) },
+  // GraphEditor can supply globally laid-out marks so dimensions avoid labels/one another.
+  // Standalone callers still fall back to per-item primitive generation.
+  marks: { type: Array, default: null },
 });
 const marks = computed(() =>
-  primitives(props.item, {
-    feetPerSquare: props.feetPerSquare,
-    gridUnit: props.gridUnit,
-    graphStyle: props.graphStyle,
-  }),
+  Array.isArray(props.marks)
+    ? props.marks
+    : primitives(props.item, {
+        feetPerSquare: props.feetPerSquare,
+        gridUnit: props.gridUnit,
+        graphStyle: props.graphStyle,
+      }),
 );
 </script>
 
@@ -54,15 +59,19 @@ const marks = computed(() =>
         v-else
         :x="p.x"
         :y="p.y"
+        :data-measurement-index="p.measurement ? p.measurementIndex : undefined"
+        :data-geometry-label="p.geometryLabel ? '1' : undefined"
+        :class="{ 'movable-annotation': p.geometryLabel, 'measurement-annotation': p.measurement }"
         :font-size="p.size"
         :fill="p.color"
         text-anchor="middle"
         dominant-baseline="central"
         :transform="p.rotate ? `rotate(${p.rotate} ${p.x} ${p.y})` : undefined"
         :stroke="p.halo ? graphStyle.background || '#fffef8' : 'none'"
-        :stroke-width="p.halo ? 5 : 0"
+        :stroke-width="p.halo ? p.haloWidth || 5 : 0"
         stroke-linejoin="round"
         paint-order="stroke"
+        :pointer-events="p.measurement || p.geometryLabel ? 'all' : 'auto'"
         font-family="'DejaVu Sans', sans-serif"
         >{{ p.text }}</text
       >

@@ -15,17 +15,57 @@ function heading(text) {
   console.log("=".repeat(60) + "\n");
 }
 
-function run(args, options = {}) {
-  heading(`> pnpm ${args.join(" ")}`);
+let resolvedPackageManager = null;
 
-  // .cmd files are not standalone executables on Windows. Invoke pnpm through
-  // the user's command processor explicitly instead of spawn(..., { shell:true }),
-  // which avoids Node's shell-argument deprecation warning for these static commands.
-  const executable = isWindows ? process.env.ComSpec || "cmd.exe" : "pnpm";
+function packageManager() {
+  if (resolvedPackageManager) return resolvedPackageManager;
+
+  // A copied project may land on a Mac where pnpm is available only through
+  // Corepack (or not globally installed yet). Probe lightweight fallbacks so the
+  // Android runner can still execute the exact pinned package-manager version.
+  const candidates = isWindows
+    ? [
+        { executable: process.env.ComSpec || "cmd.exe", prefix: ["/d", "/s", "/c"], shellCommand: "pnpm", label: "pnpm" },
+        { executable: process.env.ComSpec || "cmd.exe", prefix: ["/d", "/s", "/c"], shellCommand: "corepack pnpm", label: "corepack pnpm" },
+        { executable: process.env.ComSpec || "cmd.exe", prefix: ["/d", "/s", "/c"], shellCommand: "npx --yes pnpm@12.4.1", label: "npx pnpm@12.4.1" },
+      ]
+    : [
+        { executable: "pnpm", prefix: [], label: "pnpm" },
+        { executable: "corepack", prefix: ["pnpm"], label: "corepack pnpm" },
+        { executable: "npx", prefix: ["--yes", "pnpm@12.4.1"], label: "npx pnpm@12.4.1" },
+      ];
+
+  for (const candidate of candidates) {
+    const probeArgs = isWindows
+      ? [...candidate.prefix, `${candidate.shellCommand} --version`]
+      : [...candidate.prefix, "--version"];
+    const probe = spawnSync(candidate.executable, probeArgs, {
+      cwd: root,
+      stdio: "ignore",
+      env: process.env,
+      shell: false,
+    });
+    if (probe.status === 0) {
+      resolvedPackageManager = candidate;
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    "pnpm could not be started. Install Node.js 22+; then enable Corepack (`corepack enable`) or install pnpm (`npm install -g pnpm`).",
+  );
+}
+
+function run(args, options = {}) {
+  const manager = packageManager();
+  heading(`> ${manager.label} ${args.join(" ")}`);
+
+  // .cmd files are not standalone executables on Windows. Invoke package-manager
+  // shims through cmd.exe there; macOS/Linux run the executable directly.
   const commandArgs = isWindows
-    ? ["/d", "/s", "/c", `pnpm ${args.join(" ")}`]
-    : args;
-  const result = spawnSync(executable, commandArgs, {
+    ? [...manager.prefix, `${manager.shellCommand} ${args.join(" ")}`]
+    : [...manager.prefix, ...args];
+  const result = spawnSync(manager.executable, commandArgs, {
     cwd: root,
     stdio: "inherit",
     env: process.env,
@@ -35,7 +75,7 @@ function run(args, options = {}) {
 
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`pnpm ${args.join(" ")} failed with exit code ${result.status}.`);
+    throw new Error(`${manager.label} ${args.join(" ")} failed with exit code ${result.status}.`);
   }
 }
 
@@ -179,7 +219,7 @@ try {
     console.log("Android native project already exists.");
   }
 
-  heading("STEP 4: Installing native Android PDF saver");
+  heading("STEP 4: Installing native Android file saver");
   runNode(path.join(root, "scripts", "install-android-pdf-saver.mjs"));
 
   heading("STEP 5: Building Vite application");
@@ -197,6 +237,17 @@ try {
   run(["exec", "cap", "sync", "android"]);
 
   heading("STEP 8: Selecting Android device and launching app");
+
+  // Projects copied from Windows can lose the Unix executable bit on gradlew.
+  // Repair it automatically on macOS/Linux before Capacitor asks Gradle to build.
+  if (!isWindows) {
+    const gradlew = path.join(androidRoot, "gradlew");
+    if (fs.existsSync(gradlew)) {
+      fs.chmodSync(gradlew, 0o755);
+      console.log("Verified executable permission for android/gradlew.\n");
+    }
+  }
+
   console.log("Select the Android device using the arrow keys.");
   console.log("Press Enter to build, install, and launch.\n");
   run(["exec", "cap", "run", "android", "--no-sync"]);

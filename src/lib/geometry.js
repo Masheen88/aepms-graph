@@ -241,7 +241,7 @@ function addPattern(result, item, polygon) {
   if (item.pattern === "vertical") add(hatchSegments(polygon, 1, 0, spacing));
 }
 
-function measurementText(result, item, points, closed, options) {
+function measurementText(result, item, points, closed, options, allowedIndexes = null) {
   const {
     feetPerSquare = 1,
     gridUnit = "ft",
@@ -250,29 +250,104 @@ function measurementText(result, item, points, closed, options) {
   if (!graphStyle.showMeasurements || item.showMeasurements === false || points.length < 2) return;
   const segments = points.slice(0, -1).map((point, i) => [point, points[i + 1]]);
   if (closed) segments.push([points.at(-1), points[0]]);
-  for (const [a, b] of segments) {
+  const hidden = new Set(item.hiddenMeasurements || []);
+  for (const [index, [a, b]] of segments.entries()) {
+    if (hidden.has(index) || (allowedIndexes && !allowedIndexes.has(index))) continue;
     const worldLength = Math.hypot(b.x - a.x, b.y - a.y);
     if (worldLength < 2) continue;
     const scaled = (worldLength / GRID.step) * feetPerSquare,
-      rounded = Math.abs(scaled - Math.round(scaled)) < 0.05 ? Math.round(scaled) : Number(scaled.toFixed(1));
+      rounded = Math.abs(scaled - Math.round(scaled)) < 0.05 ? Math.round(scaled) : Number(scaled.toFixed(1)),
+      configuredSize = Number(graphStyle.measurementFontSize || 6),
+      // Short details are common around porches, piers, and one-foot boxes. Keep
+      // the value legible without letting the text/halo visually replace the wall.
+      measurementSize = worldLength <= GRID.step * 1.25
+        ? Math.min(configuredSize, 4.6)
+        : worldLength <= GRID.step * 2.1
+          ? Math.min(configuredSize, 5.1)
+          : configuredSize;
     const dx = b.x - a.x,
       dy = b.y - a.y,
       length = Math.max(1, Math.hypot(dx, dy)),
-      offset = Math.max(8, graphStyle.measurementFontSize * 0.85),
-      nx = -dy / length,
-      ny = dx / length;
+      placement = graphStyle.measurementPlacement || "smart",
+      baseOffset =
+        placement === "inline"
+          ? 0
+          : placement === "close"
+            ? Math.max(2.2, measurementSize * 0.3)
+            : placement === "outside"
+              ? Math.max(7, measurementSize * 1.05)
+              : Math.max(3.2, measurementSize * 0.46),
+      distance = baseOffset + Number(item.measurementDistance || 0),
+      sidePreference = item.measurementSideOverrides?.[index] || "inherit",
+      effectiveSide = sidePreference === "inherit" ? item.measurementSide || "normal" : sidePreference,
+      side = effectiveSide === "opposite" ? -1 : 1,
+      nx = (-dy / length) * side,
+      ny = (dx / length) * side,
+      tx = dx / length,
+      ty = dy / length,
+      midpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      // Free x/y measurement offsets from older saves are deliberately ignored.
+      // A dimension must remain visually attached to the segment it measures.
+      manual = { x: 0, y: 0 },
+      hasManualOffset = false;
     result.push({
       kind: "text",
       text: `${rounded} ${gridUnit}`,
-      x: clamp((a.x + b.x) / 2 + nx * offset, graphStyle.measurementFontSize * 2, GRID.width - graphStyle.measurementFontSize * 2),
-      y: clamp((a.y + b.y) / 2 + ny * offset, graphStyle.measurementFontSize * 1.5, GRID.height - graphStyle.measurementFontSize * 1.5),
-      size: graphStyle.measurementFontSize,
+      x: clamp(
+        midpoint.x + nx * distance + Number(manual.x || 0),
+        measurementSize * 1.7,
+        GRID.width - measurementSize * 1.7,
+      ),
+      y: clamp(
+        midpoint.y + ny * distance + Number(manual.y || 0),
+        measurementSize * 1.3,
+        GRID.height - measurementSize * 1.3,
+      ),
+      size: measurementSize,
       color: graphStyle.dimensions,
       anchor: "middle",
+      // Measurements intentionally use a thinner halo than ordinary labels so dense
+      // drawings keep more of the wall/grid visible around the value.
       halo: true,
+      haloWidth: 0.75,
       measurement: true,
+      rotate: (() => {
+        if ((graphStyle.measurementOrientation || "horizontal") !== "along") return 0;
+        let angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+        // Keep text upright when it follows a wall from right-to-left.
+        if (angle > 90) angle -= 180;
+        if (angle < -90) angle += 180;
+        return angle;
+      })(),
+      measurementIndex: index,
+      // Layout metadata is ignored by the SVG/PDF painters but lets the shared smart
+      // measurement pass resolve collisions identically on screen and in exported PDFs.
+      measurementManual: hasManualOffset,
+      measurementLayout: { midpoint, nx, ny, tx, ty, distance },
+      measurementSegment: { a, b },
     });
   }
+}
+
+function simplifiedMeasurementIndexes(item, points, graphStyle) {
+  if ((graphStyle.measurementDetail || "simplified") === "all") return null;
+  if (["rect", "ellipse"].includes(item.type)) return new Set([0, 1]);
+  if (item.type !== "outline" || item.closed !== true || points.length !== 4) return null;
+
+  // A simple four-corner orthogonal outline reads as a box. Width + height are
+  // enough; repeating the same dimensions on all four sides hides small geometry.
+  const vectors = points.map((point, index) => {
+    const next = points[(index + 1) % points.length];
+    return { x: next.x - point.x, y: next.y - point.y };
+  });
+  const orthogonal = vectors.every((vector, index) => {
+    const next = vectors[(index + 1) % vectors.length];
+    return Math.abs(vector.x * next.x + vector.y * next.y) < 0.01;
+  });
+  const oppositeMatch =
+    Math.abs(Math.hypot(vectors[0].x, vectors[0].y) - Math.hypot(vectors[2].x, vectors[2].y)) < 0.05 &&
+    Math.abs(Math.hypot(vectors[1].x, vectors[1].y) - Math.hypot(vectors[3].x, vectors[3].y)) < 0.05;
+  return orthogonal && oppositeMatch ? new Set([0, 1]) : null;
 }
 
 export function primitives(item, options = {}) {
@@ -283,7 +358,7 @@ export function primitives(item, options = {}) {
   const result = [];
   const path = (points, closed = false, smooth = false) =>
     result.push({ kind: "path", points, closed, color, width, smooth });
-  const text = (value, x, y, size = fontSize, rotate = 0) => {
+  const text = (value, x, y, size = fontSize, rotate = 0, meta = {}) => {
     if (value)
       result.push({
         kind: "text",
@@ -295,6 +370,7 @@ export function primitives(item, options = {}) {
         anchor: "middle",
         halo: true,
         rotate,
+        ...meta,
       });
   };
   if (["rect", "ellipse"].includes(item.type)) {
@@ -315,19 +391,50 @@ export function primitives(item, options = {}) {
       ],
       true,
       options,
+      simplifiedMeasurementIndexes(item, [
+        { x: b.x, y: b.y },
+        { x: b.right, y: b.y },
+        { x: b.right, y: b.bottom },
+        { x: b.x, y: b.bottom },
+      ], options.graphStyle || DEFAULT_GRAPH_STYLE),
     );
-    if (showGeometryLabel)
-      text(item.text, (b.x + b.right) / 2, (b.y + b.bottom) / 2);
+    if (showGeometryLabel) {
+      const offset = item.labelOffset || { x: 0, y: 0 };
+      text(
+        item.text,
+        (b.x + b.right) / 2 + Number(offset.x || 0),
+        (b.y + b.bottom) / 2 + Number(offset.y || 0),
+        fontSize,
+        0,
+        { geometryLabel: true },
+      );
+    }
   } else if (["outline", "line", "freehand", "curve"].includes(item.type)) {
     const polygon = polygonFor(item);
     const renderedPoints = ["outline", "line"].includes(item.type) ? corneredPathPoints(item) : p;
     addPattern(result, item, polygon);
     path(renderedPoints, item.closed, item.type === "curve");
     if (["outline", "line", "curve"].includes(item.type))
-      measurementText(result, item, p, item.closed, options);
+      measurementText(
+        result,
+        item,
+        p,
+        item.closed,
+        options,
+        simplifiedMeasurementIndexes(item, p, options.graphStyle || DEFAULT_GRAPH_STYLE),
+      );
     const b = bounds(item);
-    if (showGeometryLabel)
-      text(item.text, (b.x + b.right) / 2, (b.y + b.bottom) / 2);
+    if (showGeometryLabel) {
+      const offset = item.labelOffset || { x: 0, y: 0 };
+      text(
+        item.text,
+        (b.x + b.right) / 2 + Number(offset.x || 0),
+        (b.y + b.bottom) / 2 + Number(offset.y || 0),
+        fontSize,
+        0,
+        { geometryLabel: true },
+      );
+    }
   } else if (item.type === "symbol" && item.symbol === "door") {
     const { x, y } = p[0];
     // Crawlspace access is rendered as a simple, familiar Z-like field mark.
@@ -444,4 +551,151 @@ export function toForm(point) {
     x: PRINT_GRAPH.x + point.x * PRINT_GRAPH.scale,
     y: PRINT_GRAPH.y + point.y * PRINT_GRAPH.scale,
   };
+}
+
+
+function annotationBox(mark, padding = 3) {
+  const width = Math.max(mark.size * 1.8, String(mark.text || "").length * mark.size * 0.62 + padding * 2);
+  const height = mark.size * 1.45 + padding * 2;
+  return {
+    x: mark.x - width / 2,
+    y: mark.y - height / 2,
+    right: mark.x + width / 2,
+    bottom: mark.y + height / 2,
+  };
+}
+
+function boxOverlapArea(a, b) {
+  const width = Math.max(0, Math.min(a.right, b.right) - Math.max(a.x, b.x));
+  const height = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.y, b.y));
+  return width * height;
+}
+
+/**
+ * Lay out every item's primitives together so automatic dimension labels can avoid
+ * one another and ordinary geometry labels. Manual dimension drags remain authoritative.
+ * The return value preserves item grouping for GraphEditor while PDF export can flatten it.
+ */
+export function primitivesForItems(items, options = {}) {
+  const graphStyle = options.graphStyle || DEFAULT_GRAPH_STYLE;
+  const entries = items.map((item) => ({ id: item.id, marks: primitives(item, options) }));
+  const reserved = [];
+  const seenMeasurementSegments = new Set();
+
+  // Exact overlapping walls can exist in recovered/older drawings. Keep the wall
+  // geometry intact, but render only one dimension for the same exact segment so
+  // duplicate lines do not create an unreadable stack of identical values.
+  for (const entry of entries) {
+    entry.marks = entry.marks.filter((mark) => {
+      if (!mark.measurement || !mark.measurementSegment) return true;
+      const { a, b } = mark.measurementSegment;
+      const first = `${Number(a.x.toFixed(3))},${Number(a.y.toFixed(3))}`;
+      const second = `${Number(b.x.toFixed(3))},${Number(b.y.toFixed(3))}`;
+      const key = first < second ? `${first}|${second}` : `${second}|${first}`;
+      if (seenMeasurementSegments.has(key)) return false;
+      seenMeasurementSegments.add(key);
+      return true;
+    });
+  }
+
+  // Reserve ordinary text and every manually positioned dimension first. Automatic
+  // dimensions should move around room labels, symbols, notes, and pinned dimensions
+  // regardless of item ordering in the report.
+  for (const entry of entries) {
+    for (const mark of entry.marks) {
+      if (mark.kind !== "text") continue;
+      if (!mark.measurement || mark.measurementManual) {
+        if (mark.measurementManual) mark.measurementAutoOffset = { x: 0, y: 0 };
+        reserved.push(annotationBox(mark, 2.5));
+      }
+    }
+  }
+
+  const fontSize = Number(graphStyle.measurementFontSize || 6);
+  const placement = graphStyle.measurementPlacement || "smart";
+  const crowding = graphStyle.measurementCrowding || "clean";
+  // The old collision solver could move a 1 ft label two or more grid squares away
+  // from its wall. Smart layout is now intentionally constrained: a measurement may
+  // move slightly farther out or a tiny amount along the wall, but never enough to
+  // make ownership ambiguous. Clean mode hides a value if that small safe zone is
+  // still crowded; Show all keeps the best nearby candidate instead.
+  const useSmartLayout = placement === "smart" || placement === "outside";
+  const normalSteps = placement === "outside" ? [0, 3, 6, 9] : [0, 2, 4, 6];
+  const tangentSteps = [0, 1.5, -1.5];
+  const suppressOverlapThreshold = Math.max(7, fontSize * fontSize * 0.45);
+
+  for (const entry of entries) {
+    for (const mark of entry.marks) {
+      if (mark.kind !== "text" || !mark.measurement) continue;
+      if (mark.measurementManual || !mark.measurementLayout) {
+        if (!mark.measurementAutoOffset) mark.measurementAutoOffset = { x: 0, y: 0 };
+        continue;
+      }
+      if (!useSmartLayout) {
+        mark.measurementAutoOffset = { x: 0, y: 0 };
+        reserved.push(annotationBox(mark, 2));
+        continue;
+      }
+
+      const originalPosition = { x: mark.x, y: mark.y };
+      const { midpoint, nx, ny, tx, ty, distance } = mark.measurementLayout;
+      const candidates = [];
+      // Smart layout never changes the chosen side of a segment. It only moves farther
+      // from the wall or along it, so Default side / Flip side remain predictable.
+      for (const sideMultiplier of [1]) {
+        for (const extraNormal of normalSteps) {
+          for (const tangent of tangentSteps) {
+            const normalDistance = sideMultiplier * (distance + extraNormal);
+            candidates.push({
+              x: midpoint.x + nx * normalDistance + tx * tangent,
+              y: midpoint.y + ny * normalDistance + ty * tangent,
+              sidePenalty: 0,
+              travelPenalty: Math.abs(extraNormal) * 0.35 + Math.abs(tangent) * 0.18,
+            });
+          }
+        }
+      }
+
+      let best = null;
+      for (const candidate of candidates) {
+        const placed = {
+          ...mark,
+          x: clamp(candidate.x, fontSize * 2, GRID.width - fontSize * 2),
+          y: clamp(candidate.y, fontSize * 1.5, GRID.height - fontSize * 1.5),
+        };
+        const box = annotationBox(placed, 2.5);
+        const overlap = reserved.reduce((sum, other) => sum + boxOverlapArea(box, other), 0);
+        const edgePenalty =
+          (placed.x !== candidate.x || placed.y !== candidate.y) ? fontSize * fontSize * 5 : 0;
+        const score = overlap * 30 + candidate.sidePenalty + candidate.travelPenalty + edgePenalty;
+        if (!best || score < best.score) best = { ...placed, score, box };
+        if (overlap === 0 && candidate.sidePenalty === 0 && candidate.travelPenalty === 0 && !edgePenalty) break;
+      }
+
+      if (best) {
+        const bestOverlap = reserved.reduce((sum, other) => sum + boxOverlapArea(best.box, other), 0);
+        if (crowding === "clean" && bestOverlap > suppressOverlapThreshold) {
+          mark.measurementAutoSuppressed = true;
+          mark.measurementAutoOffset = { x: 0, y: 0 };
+          continue;
+        }
+        mark.x = best.x;
+        mark.y = best.y;
+        mark.measurementAutoOffset = {
+          x: best.x - originalPosition.x,
+          y: best.y - originalPosition.y,
+        };
+        reserved.push(best.box);
+      } else {
+        mark.measurementAutoOffset = { x: 0, y: 0 };
+        reserved.push(annotationBox(mark, 2));
+      }
+    }
+  }
+
+  for (const entry of entries) {
+    entry.marks = entry.marks.filter((mark) => !mark.measurementAutoSuppressed);
+  }
+
+  return entries;
 }

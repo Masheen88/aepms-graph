@@ -3110,3 +3110,782 @@ kbd {
     display: grid;
   }
 }
+
+/* Canvas-first field workflow -------------------------------------------------
+   The drawing rail and inspector can collapse independently. These overrides are
+   intentionally placed after the responsive rules so wide tablets/desktops keep
+   the existing breakpoints while still gaining a much larger drafting surface. */
+.rail-collapse-control {
+  min-height: 42px !important;
+  border: 1px solid #dce6e8;
+  background: #f8fbfb;
+  color: #537078 !important;
+}
+.rail-collapse-control:hover {
+  background: #eef5f4 !important;
+}
+.desktop-panel-toggle {
+  display: inline-flex;
+}
+.canvas-focus-toggle {
+  margin-left: auto;
+}
+.annotation-controls {
+  display: grid;
+  gap: 9px;
+  margin: 0 0 16px;
+  padding: 11px 12px;
+  border: 1px solid #dce7e8;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+.annotation-controls > span {
+  color: #355d62;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.annotation-controls > p {
+  color: #71878c;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+.annotation-controls .field-pair {
+  margin: 0;
+}
+.annotation-controls .field {
+  margin-bottom: 0;
+}
+.movable-annotation {
+  cursor: grab;
+  user-select: none;
+}
+.movable-annotation:active {
+  cursor: grabbing;
+}
+.measurement-annotation {
+  cursor: pointer;
+  user-select: none;
+}
+.saved-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding-top: 12px;
+  border-top: 1px solid #e4ebed;
+}
+.theme-dark .rail-collapse-control,
+.theme-dark .annotation-controls {
+  border-color: #34484e;
+  background: #142328;
+}
+.theme-dark .annotation-controls > span {
+  color: #d1dfe1;
+}
+.theme-dark .annotation-controls > p {
+  color: #9cafb4;
+}
+.theme-dark .saved-backup-actions {
+  border-color: #34484e;
+}
+
+@media (min-width: 1600px) {
+  .drawing-workspace.rail-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 308px;
+  }
+  .drawing-workspace.inspector-collapsed {
+    grid-template-columns: 92px minmax(0, 1fr) 0;
+  }
+  .drawing-workspace.rail-collapsed.inspector-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 0;
+  }
+}
+@media (min-width: 1200px) and (max-width: 1599px) {
+  .drawing-workspace.rail-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 276px;
+  }
+  .drawing-workspace.inspector-collapsed {
+    grid-template-columns: 83px minmax(0, 1fr) 0;
+  }
+  .drawing-workspace.rail-collapsed.inspector-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 0;
+  }
+}
+@media (min-width: 960px) and (max-width: 1199px) {
+  .drawing-workspace.rail-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 245px;
+  }
+  .drawing-workspace.inspector-collapsed {
+    grid-template-columns: 74px minmax(0, 1fr) 0;
+  }
+  .drawing-workspace.rail-collapsed.inspector-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr) 0;
+  }
+}
+@media (min-width: 960px) {
+  .drawing-workspace.inspector-collapsed .inspector-panel {
+    display: none;
+  }
+  .drawing-workspace.rail-collapsed .tool-rail {
+    padding-inline: 5px;
+  }
+  .drawing-workspace.rail-collapsed .rail-collapse-control {
+    min-width: 42px;
+    padding-inline: 3px;
+  }
+  .drawing-workspace.rail-collapsed .rail-collapse-control span {
+    font-size: 0.65rem;
+  }
+}
+@media (max-width: 959px) {
+  .desktop-panel-toggle {
+    display: none !important;
+  }
+  .canvas-focus-toggle {
+    margin-left: 0;
+  }
+}
+@media (min-width: 640px) and (max-width: 959px) {
+  .drawing-workspace.rail-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
+}
+@media (max-width: 639px) {
+  .drawing-workspace.rail-collapsed .tool-rail {
+    justify-content: flex-start;
+  }
+  .drawing-workspace.rail-collapsed .rail-collapse-control {
+    min-width: 58px;
+  }
+  .canvas-focus-toggle {
+    display: none;
+  }
+  .saved-backup-actions {
+    display: grid;
+  }
+}
+
+/* v1.5.1 canvas radial controls -------------------------------------------------
+   Touch-first quick actions keep common point, annotation, and tool operations
+   directly on the drawing instead of burying them in the inspector. */
+.radial-menu {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  z-index: 12;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  user-select: none;
+}
+.radial-menu-ring {
+  position: absolute;
+  inset: 36px;
+  border: 1px solid #b8cacd;
+  border-radius: 50%;
+  background: #ffffffc9;
+  box-shadow: 0 12px 35px #183b4222;
+  backdrop-filter: blur(7px);
+  pointer-events: none;
+}
+.radial-action,
+.radial-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cbdadd;
+  background: #fff;
+  color: #315c63;
+  box-shadow: 0 5px 16px #183b4224;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+.radial-action {
+  width: 62px;
+  min-height: 58px;
+  padding: 6px 5px;
+  border-radius: 16px;
+  gap: 2px;
+}
+.radial-action small {
+  display: block;
+  max-width: 54px;
+  overflow: hidden;
+  font-size: 0.58rem;
+  font-weight: 750;
+  line-height: 1.05;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.radial-action:active {
+  border-color: #69a99d;
+  background: #edf8f5;
+  transform-origin: center;
+}
+.radial-action.danger {
+  border-color: #e2bbb7;
+  color: #a23b36;
+  background: #fff8f7;
+}
+.radial-action.danger:active {
+  background: #fff0ee;
+}
+.radial-center {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.vertex-delete-control {
+  cursor: pointer;
+}
+.theme-dark .radial-menu-ring {
+  border-color: #3b5359;
+  background: #102126d9;
+  box-shadow: 0 12px 35px #0008;
+}
+.theme-dark .radial-action,
+.theme-dark .radial-center {
+  border-color: #40585e;
+  background: #172a2f;
+  color: #d6e4e6;
+}
+.theme-dark .radial-action:active {
+  background: #20383d;
+}
+.theme-dark .radial-action.danger {
+  border-color: #6b403b;
+  background: #321f1d;
+  color: #f0b5aa;
+}
+
+@media (max-width: 640px) {
+  .radial-menu {
+    width: 208px;
+    height: 208px;
+  }
+  .radial-action {
+    width: 58px;
+    min-height: 56px;
+  }
+  .mobile-graph-dock {
+    gap: 6px;
+  }
+  .mobile-dock-button {
+    min-width: 82px;
+    min-height: 36px;
+    padding-inline: 9px;
+  }
+}
+
+/* v1.5.2 field-layout refinements ---------------------------------------------
+   Smaller dimensions, simpler geometry cleanup, collapsible top chrome, a more
+   readable notes workspace, and an interactive print-review surface. */
+.canvas-column {
+  position: relative;
+}
+.top-collapse-action {
+  margin-left: auto;
+}
+.collapse-chevron-up {
+  transform: rotate(180deg);
+}
+.top-ui-collapsed .app-header,
+.top-ui-collapsed .workspace-nav,
+.top-ui-collapsed .canvas-toolbar,
+.top-ui-collapsed .canvas-topline {
+  display: none !important;
+}
+.top-ui-restore {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 24;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 7px 11px;
+  border: 1px solid #cbdadd;
+  border-radius: 999px;
+  background: #fffffff0;
+  color: #315c63;
+  box-shadow: 0 6px 20px #183b4224;
+  font-size: 0.74rem;
+  font-weight: 650;
+  backdrop-filter: blur(8px);
+}
+.top-ui-restore:hover {
+  background: white;
+}
+.theme-dark .top-ui-restore {
+  border-color: #40585e;
+  background: #172a2ff0;
+  color: #d6e4e6;
+}
+.measurement-display-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin-top: 11px;
+}
+.measurement-display-grid .field {
+  margin-bottom: 0;
+}
+.measurement-mode-help {
+  margin-top: 9px;
+  padding: 0 2px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.measurement-layout-controls {
+  padding: 9px 10px;
+  gap: 7px;
+}
+.measurement-layout-controls > p {
+  line-height: 1.4;
+}
+.measurement-reset-actions {
+  gap: 6px;
+}
+
+.notes-summary-strip {
+  display: grid;
+  grid-template-columns: 1.35fr 0.8fr 1fr 1fr;
+  gap: 1px;
+  max-width: 1360px;
+  margin: -11px auto 18px;
+  overflow: hidden;
+  border: 1px solid #dce5e7;
+  border-radius: 10px;
+  background: #dce5e7;
+}
+.notes-summary-strip > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 12px 15px;
+  background: white;
+}
+.notes-summary-strip strong {
+  overflow: hidden;
+  color: #36555b;
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-summary-strip small {
+  overflow: hidden;
+  color: #829399;
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statement-card {
+  display: grid;
+  align-content: start;
+  gap: 17px;
+}
+.statement-title {
+  margin-bottom: 0;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #e5ecee;
+}
+.statement-note-block,
+.statement-signoff {
+  display: grid;
+  gap: 10px;
+}
+.statement-note-block textarea {
+  min-height: 150px;
+  margin: 0;
+  padding: 11px 12px;
+  line-height: 1.55;
+}
+.statement-subheading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.statement-subheading > span {
+  display: grid;
+  gap: 2px;
+}
+.statement-subheading strong {
+  color: #35585f;
+  font-size: 0.82rem;
+}
+.statement-subheading small,
+.statement-continuation-note {
+  color: #87999e;
+  font-size: 0.67rem;
+  line-height: 1.4;
+}
+.statement-subheading.compact {
+  align-items: center;
+}
+.note-template-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+}
+.note-template-inline select,
+.note-template-inline .btn {
+  min-height: 39px;
+}
+.note-save-template {
+  min-height: 39px;
+  padding-inline: 6px;
+  font-size: 0.75rem;
+}
+.statement-tools {
+  border: 1px solid #dfe8ea;
+  border-radius: 8px;
+  background: #f8fbfb;
+}
+.statement-tools summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 9px 12px;
+  color: #527078;
+  font-size: 0.76rem;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+}
+.statement-tools[open] summary {
+  border-bottom: 1px solid #dfe8ea;
+}
+.statement-tools .statement-preset-row {
+  margin: 0;
+  padding: 10px;
+}
+.statement-signoff {
+  padding-top: 14px;
+  border-top: 1px solid #e5ecee;
+}
+.statement-signoff > .field,
+.statement-signoff .field-pair .field {
+  margin-bottom: 0;
+}
+.statement-signoff .signature-pad {
+  margin-top: 2px;
+}
+.theme-dark .notes-summary-strip {
+  border-color: #34484e;
+  background: #34484e;
+}
+.theme-dark .notes-summary-strip > span,
+.theme-dark .statement-tools {
+  background: #142328;
+}
+.theme-dark .notes-summary-strip strong,
+.theme-dark .statement-subheading strong {
+  color: #d1dfe1;
+}
+.theme-dark .notes-summary-strip small,
+.theme-dark .statement-subheading small,
+.theme-dark .statement-continuation-note {
+  color: #9cafb4;
+}
+.theme-dark .statement-title,
+.theme-dark .statement-signoff,
+.theme-dark .statement-tools,
+.theme-dark .statement-tools[open] summary {
+  border-color: #34484e;
+}
+
+.paper-preview-shell {
+  max-width: 1320px;
+  margin: 0 auto;
+  border: 1px solid #d4e0e4;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #dfe7ea;
+}
+.preview-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 50px;
+  padding: 7px 10px 7px 14px;
+  border-bottom: 1px solid #d4e0e4;
+  background: white;
+}
+.preview-review-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #71878d;
+  font-size: 0.75rem;
+}
+.preview-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.preview-zoom-controls .icon-button {
+  min-width: 36px;
+  width: 36px;
+  height: 36px;
+}
+.zoom-readout {
+  min-width: 46px;
+  color: #45666d;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.paper-preview-viewport {
+  position: relative;
+  height: 620px;
+  overflow: hidden;
+  padding: 18px;
+  cursor: grab;
+  touch-action: none;
+  overscroll-behavior: contain;
+  outline: none;
+  background:
+    linear-gradient(45deg, #d9e2e5 25%, transparent 25%) 0 0 / 18px 18px,
+    linear-gradient(-45deg, #d9e2e5 25%, transparent 25%) 0 9px / 18px 18px,
+    linear-gradient(45deg, transparent 75%, #d9e2e5 75%) 9px -9px / 18px 18px,
+    linear-gradient(-45deg, transparent 75%, #d9e2e5 75%) -9px 0 / 18px 18px,
+    #e7edef;
+}
+.paper-preview-viewport:active {
+  cursor: grabbing;
+}
+.paper-preview-shell .paper-preview {
+  width: 1180px;
+  max-width: none;
+  margin: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.paper-preview-shell .paper-sheet {
+  margin: 0;
+}
+.paper-preview-shell .paper-sheet svg {
+  display: block;
+}
+.theme-dark .paper-preview-shell,
+.theme-dark .preview-review-toolbar {
+  border-color: #34484e;
+}
+.theme-dark .preview-review-toolbar {
+  background: #142328;
+}
+.theme-dark .paper-preview-viewport {
+  background: #0f1b1f;
+}
+.theme-dark .preview-review-label,
+.theme-dark .zoom-readout {
+  color: #aebfc3;
+}
+
+@media (max-width: 959px) {
+  .top-collapse-action {
+    order: 5;
+    margin-left: 0;
+  }
+  .notes-summary-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+  .paper-preview-viewport {
+    height: 560px;
+  }
+  .preview-review-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .preview-zoom-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+@media (max-width: 639px) {
+  .top-ui-restore {
+    top: 7px;
+    right: 8px;
+    min-height: 36px;
+    padding: 6px 9px;
+  }
+  .measurement-display-grid,
+  .notes-summary-strip {
+    grid-template-columns: 1fr;
+  }
+  .notes-summary-strip {
+    margin-top: -8px;
+  }
+  .notes-summary-strip > span {
+    padding: 10px 12px;
+  }
+  .statement-card {
+    gap: 14px;
+  }
+  .note-template-inline {
+    grid-template-columns: 1fr auto;
+  }
+  .note-save-template {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+  .paper-preview-shell {
+    margin-inline: -8px;
+    border-radius: 8px;
+  }
+  .paper-preview-viewport {
+    height: 500px;
+    padding: 10px;
+  }
+  .paper-preview-shell .paper-preview {
+    width: 1040px;
+    gap: 18px;
+  }
+  .preview-review-label {
+    font-size: 0.69rem;
+  }
+  .preview-zoom-controls {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
+/* v1.5.4: keep the field UI concise while leaving advanced drafting controls nearby. */
+.section-heading-actions,
+.measurement-primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.measurement-primary-actions {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.measurement-primary-actions .btn {
+  flex: 1 1 120px;
+}
+.compact-help {
+  width: 34px;
+  height: 34px;
+}
+.compact-settings {
+  margin-top: 10px;
+  border-top: 1px solid var(--line, #d9dfdd);
+  padding-top: 8px;
+}
+.compact-settings > summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--ink, #183b42);
+  list-style: none;
+}
+.compact-settings > summary::-webkit-details-marker {
+  display: none;
+}
+.compact-settings > summary::after {
+  content: "+";
+  font-size: 1.05rem;
+  color: var(--muted, #60706e);
+}
+.compact-settings[open] > summary::after {
+  content: "−";
+}
+.compact-settings[open] > summary {
+  margin-bottom: 10px;
+}
+.compact-settings > summary span {
+  color: var(--muted, #60706e);
+  font-weight: 600;
+}
+.compact-bulk-grid {
+  margin-top: 10px;
+}
+.object-browser.compact-settings {
+  padding-top: 0;
+}
+.compact-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.compact-summary > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+}
+.compact-summary strong {
+  font-size: 0.82rem;
+}
+.inline-help-details {
+  margin-top: 6px;
+}
+.inline-help-details summary {
+  cursor: pointer;
+  color: var(--muted, #60706e);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+.inline-help-details[open] .scale-help {
+  display: block;
+  margin-top: 5px;
+}
+.statement-signoff-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--line, #d9dfdd);
+  padding-top: 6px;
+}
+.statement-signoff-details > summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-weight: 750;
+  list-style: none;
+}
+.statement-signoff-details > summary::-webkit-details-marker {
+  display: none;
+}
+.statement-signoff-details > summary small {
+  color: var(--muted, #60706e);
+  font-weight: 600;
+}
+.statement-signoff-details[open] > summary {
+  margin-bottom: 10px;
+}
+.note-shortcuts {
+  margin-top: 6px;
+}
+.concise-help {
+  display: grid;
+  gap: 10px;
+}
+.concise-help p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+@media (max-width: 760px) {
+  .compact-summary {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .compact-summary > span {
+    min-height: 34px;
+  }
+  .measurement-primary-actions .btn {
+    min-height: 42px;
+  }
+}

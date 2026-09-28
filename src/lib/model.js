@@ -9,7 +9,15 @@ export const DEFAULT_GRAPH_STYLE = Object.freeze({
   major: "#8fa19f",
   dimensions: "#183b42",
   showMeasurements: true,
-  measurementFontSize: 10,
+  measurementFontSize: 6,
+  // Global measurement layout stays intentionally simple for field use.
+  measurementPlacement: "smart",
+  measurementOrientation: "horizontal",
+  // Clean mode suppresses a crowded dimension instead of moving it far enough away
+  // that the technician can no longer tell which wall it belongs to.
+  measurementCrowding: "clean",
+  // Simplify repeated dimensions on rectangular areas so small boxes stay readable.
+  measurementDetail: "simplified",
 });
 export const CONSTRUCTION = [
   "Crawlspace",
@@ -39,6 +47,8 @@ export const SYMBOLS = [
   { key: "tubes", text: "T", title: "Termite tubes", color: "#b43b37" },
   // A compact Z-shaped mark reads more like the hand-drawn crawlspace access symbol.
   { key: "door", text: "Z", title: "Crawlspace door", color: INK },
+  // Legacy only: older reports containing this mark still render, but new field
+  // workflows no longer surface a stair-placement tool in the top-down palette.
   { key: "steps", text: "ST", title: "Steps / stair", color: INK },
   { key: "north", text: "N", title: "North arrow", color: INK },
 ];
@@ -59,6 +69,78 @@ const point = z.object({
   x: z.number().min(0).max(GRID.width),
   y: z.number().min(0).max(GRID.height),
 });
+const offsetPoint = z.object({
+  // Offsets are stored in graph coordinates so labels and dimensions render identically
+  // in the editor, print preview, and generated PDF regardless of screen size.
+  x: z.number().min(-GRID.width).max(GRID.width),
+  y: z.number().min(-GRID.height).max(GRID.height),
+});
+const denseOffsetArray = z.preprocess(
+  (value) =>
+    Array.isArray(value)
+      ? Array.from({ length: value.length }, (_, index) => {
+          const entry = value[index];
+          return entry && typeof entry === "object" ? entry : { x: 0, y: 0 };
+        })
+      : value,
+  z.array(offsetPoint).max(6000),
+);
+const denseMeasurementSideArray = z.preprocess(
+  (value) =>
+    Array.isArray(value)
+      ? Array.from({ length: value.length }, (_, index) => {
+          const entry = value[index];
+          return ["inherit", "normal", "opposite"].includes(entry) ? entry : "inherit";
+        })
+      : value,
+  z.array(z.enum(["inherit", "normal", "opposite"])).max(6000),
+);
+const densePointLinkArray = z.preprocess(
+  (value) =>
+    Array.isArray(value)
+      ? Array.from({ length: value.length }, (_, index) =>
+          typeof value[index] === "string" ? value[index] : "",
+        )
+      : value,
+  z.array(z.string().max(80)).max(6000),
+);
+
+function normalizeReportInput(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const sourceRevision = Number(value.schemaRevision || 1);
+  const normalized = { ...value };
+
+  if (value.graphStyle && typeof value.graphStyle === "object") {
+    normalized.graphStyle = { ...value.graphStyle };
+    // The original v1 fieldbook used 10px dimensions. On dense phone drawings this
+    // can cover one-foot walls almost completely, so legacy v1 reports migrate to
+    // the compact field default while newer reports preserve an explicit choice.
+    if (sourceRevision === 1 && Number(normalized.graphStyle.measurementFontSize) === 10) {
+      normalized.graphStyle.measurementFontSize = DEFAULT_GRAPH_STYLE.measurementFontSize;
+    }
+  }
+
+  if (sourceRevision < 6 && Array.isArray(value.items)) {
+    normalized.items = value.items.map((item) =>
+      item && typeof item === "object"
+        ? {
+            ...item,
+            // v1.5.4 fully retires free-floating dimension positions. Older
+            // offsets/side-distance experiments can make a value look attached to the
+            // wrong wall, so migration returns location controls to the constrained
+            // automatic layout. Deliberately hidden dimensions are preserved.
+            measurementOffsets: [],
+            measurementSideOverrides: [],
+            measurementDistance: 0,
+            measurementSide: "normal",
+          }
+        : item,
+    );
+  }
+
+  return normalized;
+}
+
 const short = z.string().max(120);
 const calendarDate = z.union([
   z.literal(""),
@@ -96,7 +178,11 @@ const graphStyleSchema = z
     major: hexColor.default(DEFAULT_GRAPH_STYLE.major),
     dimensions: hexColor.default(DEFAULT_GRAPH_STYLE.dimensions),
     showMeasurements: z.boolean().default(DEFAULT_GRAPH_STYLE.showMeasurements),
-    measurementFontSize: z.number().min(6).max(30).default(DEFAULT_GRAPH_STYLE.measurementFontSize),
+    measurementFontSize: z.number().min(5).max(30).default(DEFAULT_GRAPH_STYLE.measurementFontSize),
+    measurementPlacement: z.enum(["smart", "close", "outside", "inline"]).default(DEFAULT_GRAPH_STYLE.measurementPlacement),
+    measurementOrientation: z.enum(["horizontal", "along"]).default(DEFAULT_GRAPH_STYLE.measurementOrientation),
+    measurementCrowding: z.enum(["clean", "all"]).default(DEFAULT_GRAPH_STYLE.measurementCrowding),
+    measurementDetail: z.enum(["simplified", "all"]).default(DEFAULT_GRAPH_STYLE.measurementDetail),
   })
   // Old v1 backups did not contain graphStyle. Defaults keep those files importable.
   .default(() => ({ ...DEFAULT_GRAPH_STYLE }));
@@ -123,6 +209,24 @@ export const itemSchema = z
     showLabel: z.boolean().default(true),
     // Measurements can be turned off for a single object while remaining on elsewhere.
     showMeasurements: z.boolean().default(true),
+    // Geometry labels are independently movable. Older saves default to the geometric center.
+    labelOffset: offsetPoint.default(() => ({ x: 0, y: 0 })),
+    // Retained only for backwards-compatible imports from earlier builds. Current
+    // rendering ignores free x/y dimension offsets so measurements cannot drift away
+    // from the wall they describe.
+    measurementOffsets: denseOffsetArray.default(() => []),
+    // Individual dimension labels can be hidden without disabling measurements for the whole object.
+    // This is especially useful around dense corners and hatch areas on phone/tablet drawings.
+    hiddenMeasurements: z.array(z.number().int().min(0).max(5999)).max(6000).default(() => []),
+    // Per-segment side overrides power the canvas radial menu while preserving the existing
+    // whole-object side preference for older reports. Missing entries inherit measurementSide.
+    measurementSideOverrides: denseMeasurementSideArray.default(() => []),
+    measurementDistance: z.number().min(-40).max(120).default(0),
+    measurementSide: z.enum(["normal", "opposite"]).default("normal"),
+    // A lightweight group id keeps grouped shapes reversible instead of destructively merging them.
+    groupId: z.string().max(80).default(""),
+    // Point-link ids weld vertices across separate shapes while remaining reversible.
+    pointLinks: densePointLinkArray.default(() => []),
     // Single-point symbols and labels can be rotated to match the graph.
     rotation: z.number().min(-180).max(180).default(0),
   })
@@ -141,9 +245,13 @@ export const itemSchema = z
         message: "This area shape needs two corners",
       });
   });
-export const reportSchema = z
-  .object({
+export const reportSchema = z.preprocess(
+  normalizeReportInput,
+  z.object({
     schemaVersion: z.literal(1),
+    // schemaRevision is additive within the v1 backup format. Parsing an older save upgrades
+    // it to the latest additive revision while the new item fields below receive safe defaults.
+    schemaRevision: z.number().int().min(1).max(6).default(6).transform(() => 6),
     id: z.string().uuid(),
     title: z.string().min(1).max(80),
     customer: short,
@@ -168,7 +276,8 @@ export const reportSchema = z
         }),
       )
       .max(30),
-  })
+  }),
+)
   .refine(
     (r) => r.items.reduce((n, i) => n + i.points.length, 0) <= 40000,
     "This drawing has too many points. Split it into separate reports.",
@@ -186,6 +295,7 @@ export function blankReport() {
   });
   return {
     schemaVersion: 1,
+    schemaRevision: 6,
     id: uid(),
     title: "Untitled inspection",
     customer: "",
@@ -220,6 +330,14 @@ export function newItem(type, points, overrides = {}) {
     cornerRadius: 0,
     showLabel: true,
     showMeasurements: true,
+    labelOffset: { x: 0, y: 0 },
+    measurementOffsets: [],
+    hiddenMeasurements: [],
+    measurementSideOverrides: [],
+    measurementDistance: 0,
+    measurementSide: "normal",
+    groupId: "",
+    pointLinks: Array.from({ length: points.length }, () => ""),
     rotation: 0,
     ...overrides,
   };
@@ -283,7 +401,6 @@ export function sampleReport() {
       { text: "Curved walkway", width: 1, pattern: "diagonal", closed: true, showMeasurements: false },
     ),
     newItem("symbol", [{ x: 435, y: 540 }], { text: "Z", symbol: "door", rotation: 90 }),
-    newItem("symbol", [{ x: 250, y: 610 }], { text: "ST", symbol: "steps", rotation: 90 }),
     newItem("symbol", [{ x: 200, y: 260 }], {
       text: "XXX",
       symbol: "termites",

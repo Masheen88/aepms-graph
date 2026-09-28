@@ -26,12 +26,14 @@ import {
   Layers,
   LoaderCircle,
   MapPinned,
+  Maximize,
   Moon,
   MousePointer2,
   MoveUpRight,
   Pencil,
   Plus,
   Redo2,
+  RotateCcw,
   Save,
   ScanLine,
   Settings2,
@@ -63,7 +65,10 @@ import {
 import { bounds, clamp, snapStepForScale, translatePoints } from "./lib/geometry.js";
 import {
   canUseNativeAndroidFileSave,
+  savePdfToAndroidDownloads,
   savePdfWithNativeAndroidPicker,
+  saveTextToAndroidDownloads,
+  saveTextWithNativeAndroidPicker,
 } from "./lib/nativeFileSave.js";
 
 const report = ref(blankReport()),
@@ -78,6 +83,9 @@ const tab = ref("graph"),
   selectedIds = ref([]),
   snap = ref(true),
   panelOpen = ref(false),
+  railCollapsed = ref(false),
+  inspectorCollapsed = ref(false),
+  topUiCollapsed = ref(false),
   lineAutoConnect = ref(true),
   multiSelectMode = ref(false);
 const graph = ref(null),
@@ -100,6 +108,7 @@ const paper = ref("letter"),
   custom = ref({ title: "", text: "" }),
   preparedPdf = ref(null),
   mobileFileFlow = ref(false),
+  deviceSavedAt = ref(""),
   credentialProfiles = ref([]),
   noteTemplates = ref([]),
   presetDraft = ref({ title: "", role: "inspector" });
@@ -152,6 +161,9 @@ const selectedSupportsPattern = computed(() =>
 const selectedSupportsMeasurement = computed(() =>
   ["rect", "ellipse", "outline", "line", "curve"].includes(selected.value?.type),
 );
+const selectedHiddenMeasurementCount = computed(() =>
+  selected.value?.hiddenMeasurements?.length || 0,
+);
 const selectedSupportsClosedShape = computed(() =>
   ["outline", "curve", "freehand"].includes(selected.value?.type),
 );
@@ -163,6 +175,19 @@ const selectedSupportsCornerTreatment = computed(() =>
 );
 const selectedSupportsPointEditing = computed(() =>
   ["outline", "line"].includes(selected.value?.type),
+);
+const selectedHasLinkedPoints = computed(() =>
+  selectedItems.value.some((item) => (item.pointLinks || []).some(Boolean)),
+);
+const selectedHasGroup = computed(() =>
+  selectedItems.value.some((item) => Boolean(item.groupId)),
+);
+const selectedStraightLines = computed(() =>
+  selectedItems.value.filter((item) => item.type === "line" && item.points?.length === 2),
+);
+const canCombineSelectedLines = computed(() => selectedStraightLines.value.length >= 2);
+const canSplitSelectedLine = computed(() =>
+  selectedCount.value === 1 && selected.value?.type === "line" && selected.value.points?.length === 2,
 );
 const selectedCornerStyle = computed(() => {
   if (!selected.value) return "square";
@@ -191,11 +216,11 @@ const canUndo = computed(() => historyIndex.value > 0),
 const tools = [
   { id: "select", label: "Select", icon: MousePointer2, key: "V" },
   { id: "outline", label: "Outline", icon: ScanLine, key: "O" },
-  { id: "rect", label: "Room", icon: Square, key: "R" },
+  { id: "rect", label: "Area", icon: Square, key: "R" },
   { id: "rounded", label: "Rounded", icon: Square, key: "U" },
   { id: "beveled", label: "Bevel", icon: Square, key: "J" },
   { id: "ellipse", label: "Oval", icon: Circle, key: "E" },
-  { id: "hatch", label: "Hatch box", icon: Grid2X2, key: "A" },
+  { id: "hatch", label: "Hatch area", icon: Grid2X2, key: "A" },
   { id: "hatchpoly", label: "Hatch polygon", icon: Grid2X2, key: "G" },
   { id: "line", label: "Line", icon: MoveUpRight, key: "L" },
   { id: "curve", label: "Curve", icon: Pencil, key: "C" },
@@ -205,6 +230,10 @@ const tools = [
   { id: "point", label: "Point", icon: Circle, key: "P" },
   { id: "pan", label: "Pan", icon: Hand, key: "H" },
 ];
+// Keep the always-visible rail focused on the tools used most during a top-down field sketch.
+// Advanced geometry stays one tap away in the inspector instead of filling the whole screen.
+const QUICK_TOOL_IDS = new Set(["select", "outline", "line", "rect", "hatch", "label", "pan"]);
+const quickTools = tools.filter((item) => QUICK_TOOL_IDS.has(item.id));
 const LOCAL_REPORT_PREFIX = "tf-native-report:";
 
 let draftTimer,
@@ -267,6 +296,23 @@ function setTool(value) {
 function toggleMultiSelectMode() {
   multiSelectMode.value = !multiSelectMode.value;
 }
+function toggleInspector() {
+  if (globalThis.matchMedia?.("(max-width: 959px)").matches) {
+    panelOpen.value = !panelOpen.value;
+    return;
+  }
+  inspectorCollapsed.value = !inspectorCollapsed.value;
+}
+function toggleCanvasFocus() {
+  const enteringFocus = !railCollapsed.value || !inspectorCollapsed.value;
+  railCollapsed.value = enteringFocus;
+  inspectorCollapsed.value = enteringFocus;
+  panelOpen.value = false;
+}
+function toggleTopUi() {
+  topUiCollapsed.value = !topUiCollapsed.value;
+  panelOpen.value = false;
+}
 function toggleTheme() {
   darkMode.value = !darkMode.value;
   try {
@@ -279,6 +325,13 @@ function resetGraphStyle() {
   report.value.graphStyle = { ...DEFAULT_GRAPH_STYLE };
   recordHistory();
 }
+function setMasterMeasurements(value) {
+  // The toolbar switch is a persistent global display preference. Do not rewrite
+  // each object's own visibility flag here: inspectors can keep deliberate per-shape
+  // exceptions, and new geometry inherits the current global preference.
+  report.value.graphStyle.showMeasurements = value;
+  recordHistory();
+}
 function setAllMeasurements(value) {
   report.value.graphStyle.showMeasurements = value;
   report.value.items = report.value.items.map((item) =>
@@ -289,6 +342,29 @@ function setAllMeasurements(value) {
   recordHistory();
   notify(value ? "Measurements enabled for all measurable objects." : "Measurements hidden for all objects.");
 }
+function resetAllMeasurementLayout() {
+  // Reflow means one predictable, readable layout. Earlier builds only cleared stored
+  // offsets, while the collision solver itself could still move a value several feet
+  // from its wall. Restore constrained Smart + Clean mode as part of the recovery.
+  report.value.graphStyle.measurementPlacement = "smart";
+  report.value.graphStyle.measurementCrowding = "clean";
+  report.value.graphStyle.measurementDetail = "simplified";
+  report.value.items = report.value.items.map((item) =>
+    ["rect", "ellipse", "outline", "line", "curve"].includes(item.type)
+      ? {
+          ...item,
+          measurementOffsets: [],
+          hiddenMeasurements: [],
+          measurementSideOverrides: [],
+          measurementDistance: 0,
+          measurementSide: "normal",
+        }
+      : item,
+  );
+  recordHistory();
+  notify("Dimensions reflowed close to their walls. Crowded values are hidden instead of moved far away.");
+}
+
 function setSelectedMeasurements(value) {
   if (!selectedCount.value) return;
   const ids = new Set(selectedIds.value);
@@ -402,8 +478,14 @@ function deleteSelectedVertex(index) {
     return;
   }
   const points = clone(selected.value.points);
+  const pointLinks = clone(selected.value.pointLinks || []);
   points.splice(index, 1);
+  pointLinks.splice(index, 1);
   selected.value.points = points;
+  selected.value.pointLinks = pointLinks;
+  selected.value.measurementOffsets = [];
+  selected.value.hiddenMeasurements = [];
+  selected.value.measurementSideOverrides = [];
   recordHistory();
 }
 function insertSelectedVertexAfter(index) {
@@ -429,7 +511,13 @@ function insertSelectedVertexAfter(index) {
     return;
   }
   points.splice(nextIndex, 0, midpoint);
+  const pointLinks = clone(selected.value.pointLinks || []);
+  pointLinks.splice(nextIndex, 0, "");
   selected.value.points = points;
+  selected.value.pointLinks = pointLinks;
+  selected.value.measurementOffsets = [];
+  selected.value.hiddenMeasurements = [];
+  selected.value.measurementSideOverrides = [];
   recordHistory();
 }
 function patchSelectedCornerStyle(value) {
@@ -460,8 +548,296 @@ function convertSelectedRectToOutline() {
   ];
   selected.value.closed = true;
   selected.value.cornerStyle = style;
+  selected.value.pointLinks = ["", "", "", ""];
+  selected.value.measurementOffsets = [];
+  selected.value.hiddenMeasurements = [];
+  selected.value.measurementSideOverrides = [];
   recordHistory();
   notify("Rectangle converted to an editable 4-point outline.");
+}
+function resetSelectedLabelPosition() {
+  if (!selected.value) return;
+  selected.value.labelOffset = { x: 0, y: 0 };
+  recordHistory();
+  notify("Label returned to its automatic position.");
+}
+function resetSelectedMeasurementLayout() {
+  if (!selected.value) return;
+  selected.value.measurementOffsets = [];
+  selected.value.hiddenMeasurements = [];
+  selected.value.measurementSideOverrides = [];
+  selected.value.measurementDistance = 0;
+  selected.value.measurementSide = "normal";
+  recordHistory();
+  notify("Measurement labels returned to automatic positions.");
+}
+function groupSelected() {
+  if (selectedCount.value < 2) return;
+  const ids = new Set(selectedIds.value);
+  const groupId = uid();
+  report.value.items = report.value.items.map((item) =>
+    ids.has(item.id) ? { ...item, groupId } : item,
+  );
+  recordHistory();
+  notify(`${selectedCount.value} shapes grouped. Selecting one now selects the group.`);
+}
+function ungroupSelected() {
+  if (!selectedCount.value) return;
+  const groupIds = new Set(selectedItems.value.map((item) => item.groupId).filter(Boolean));
+  const ids = new Set(selectedIds.value);
+  report.value.items = report.value.items.map((item) =>
+    ids.has(item.id) || (item.groupId && groupIds.has(item.groupId))
+      ? { ...item, groupId: "" }
+      : item,
+  );
+  recordHistory();
+  notify("Selected shapes ungrouped.");
+}
+function mergeSelectedPoints() {
+  if (selectedCount.value < 2) {
+    notify("Select at least two shapes to join nearby corners.");
+    return;
+  }
+  const ids = new Set(selectedIds.value);
+  const entries = selectedItems.value.flatMap((item) =>
+    item.points.map((point, pointIndex) => ({
+      itemId: item.id,
+      pointIndex,
+      point,
+      currentLink: item.pointLinks?.[pointIndex] || "",
+    })),
+  );
+  const threshold = Math.max(2, cornerSnapStep.value * 1.35);
+  const parent = entries.map((_, index) => index);
+  const find = (index) => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  const union = (a, b) => {
+    a = find(a);
+    b = find(b);
+    if (a !== b) parent[b] = a;
+  };
+  for (let a = 0; a < entries.length; a++) {
+    for (let b = a + 1; b < entries.length; b++) {
+      if (entries[a].itemId === entries[b].itemId) continue;
+      if (Math.hypot(entries[a].point.x - entries[b].point.x, entries[a].point.y - entries[b].point.y) <= threshold)
+        union(a, b);
+    }
+  }
+  const clusters = new Map();
+  entries.forEach((entry, index) => {
+    const root = find(index);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(entry);
+  });
+  const welds = [...clusters.values()].filter((cluster) => cluster.length > 1);
+  if (!welds.length) {
+    notify(`No selected corners were close enough to join.`);
+    return;
+  }
+  const updates = new Map();
+  for (const item of selectedItems.value) {
+    updates.set(item.id, {
+      points: clone(item.points),
+      pointLinks: Array.from({ length: item.points.length }, (_, index) => item.pointLinks?.[index] || ""),
+    });
+  }
+  const relink = new Map();
+  const linkPositions = new Map();
+  for (const cluster of welds) {
+    const existingIds = [...new Set(cluster.map((entry) => entry.currentLink).filter(Boolean))];
+    const linkId = existingIds[0] || uid();
+    // If two already-welded networks are brought together, unify their ids as well
+    // as their coordinates so no invisible stale connection remains behind.
+    existingIds.forEach((existingId) => relink.set(existingId, linkId));
+    let x = cluster.reduce((sum, entry) => sum + entry.point.x, 0) / cluster.length;
+    let y = cluster.reduce((sum, entry) => sum + entry.point.y, 0) / cluster.length;
+    if (snap.value) {
+      const step = cornerSnapStep.value;
+      x = Math.round(x / step) * step;
+      y = Math.round(y / step) * step;
+    }
+    const mergedPoint = { x: clamp(x, 0, GRID.width), y: clamp(y, 0, GRID.height) };
+    linkPositions.set(linkId, mergedPoint);
+    cluster.forEach((entry) => {
+      const update = updates.get(entry.itemId);
+      update.points[entry.pointIndex] = mergedPoint;
+      update.pointLinks[entry.pointIndex] = linkId;
+    });
+  }
+  report.value.items = report.value.items.map((item) => {
+    const update = ids.has(item.id) ? updates.get(item.id) : null;
+    const points = clone(update?.points || item.points);
+    const pointLinks = Array.from(
+      { length: points.length },
+      (_, index) => update?.pointLinks?.[index] || item.pointLinks?.[index] || "",
+    );
+    let changed = Boolean(update);
+    pointLinks.forEach((currentId, index) => {
+      const normalizedId = relink.get(currentId) || currentId;
+      if (normalizedId !== currentId) {
+        pointLinks[index] = normalizedId;
+        changed = true;
+      }
+      const position = linkPositions.get(normalizedId);
+      if (position) {
+        points[index] = clone(position);
+        changed = true;
+      }
+    });
+    return changed ? { ...item, points, pointLinks } : item;
+  });
+  recordHistory();
+  notify(`${welds.length} nearby corner ${welds.length === 1 ? "join" : "joins"} created.`);
+}
+function combineOverlappingLines() {
+  const lines = selectedStraightLines.value;
+  if (lines.length < 2) {
+    notify("Select at least two straight lines that overlap or touch.");
+    return;
+  }
+
+  const tolerance = Math.max(1.5, cornerSnapStep.value * 0.35);
+  const parent = lines.map((_, index) => index);
+  const find = (index) => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  const union = (a, b) => {
+    a = find(a);
+    b = find(b);
+    if (a !== b) parent[b] = a;
+  };
+  const compatibleStyle = (a, b) =>
+    a.color === b.color && Math.abs(Number(a.width || 0) - Number(b.width || 0)) < 0.01;
+  const overlapsOnSameLine = (a, b) => {
+    if (!compatibleStyle(a, b)) return false;
+    const [a0, a1] = a.points;
+    const dx = a1.x - a0.x;
+    const dy = a1.y - a0.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 0.01) return false;
+    const ux = dx / length;
+    const uy = dy / length;
+    const distanceToLine = (point) => Math.abs((point.x - a0.x) * uy - (point.y - a0.y) * ux);
+    if (b.points.some((point) => distanceToLine(point) > tolerance)) return false;
+    const projection = (point) => (point.x - a0.x) * ux + (point.y - a0.y) * uy;
+    const values = b.points.map(projection);
+    const bMin = Math.min(...values);
+    const bMax = Math.max(...values);
+    return bMax >= -tolerance && bMin <= length + tolerance;
+  };
+
+  for (let a = 0; a < lines.length; a++) {
+    for (let b = a + 1; b < lines.length; b++) {
+      if (overlapsOnSameLine(lines[a], lines[b])) union(a, b);
+    }
+  }
+
+  const clusters = new Map();
+  lines.forEach((line, index) => {
+    const root = find(index);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(line);
+  });
+  const mergeable = [...clusters.values()].filter((cluster) => cluster.length > 1);
+  if (!mergeable.length) {
+    notify("No selected lines overlap on the same path. Lines with different thickness or color stay separate.");
+    return;
+  }
+
+  const replacements = new Map();
+  const removals = new Set();
+  const keepSelected = [];
+  for (const cluster of mergeable) {
+    const base = cluster[0];
+    const [origin, end] = base.points;
+    const dx = end.x - origin.x;
+    const dy = end.y - origin.y;
+    const length = Math.max(0.01, Math.hypot(dx, dy));
+    const ux = dx / length;
+    const uy = dy / length;
+    const candidates = cluster.flatMap((line) =>
+      line.points.map((point, pointIndex) => ({
+        point,
+        pointIndex,
+        line,
+        t: (point.x - origin.x) * ux + (point.y - origin.y) * uy,
+      })),
+    );
+    const low = candidates.reduce((best, entry) => (entry.t < best.t ? entry : best));
+    const high = candidates.reduce((best, entry) => (entry.t > best.t ? entry : best));
+    const snapPoint = (point) => {
+      if (!snap.value) return { x: clamp(point.x, 0, GRID.width), y: clamp(point.y, 0, GRID.height) };
+      const step = cornerSnapStep.value;
+      return {
+        x: clamp(Math.round(point.x / step) * step, 0, GRID.width),
+        y: clamp(Math.round(point.y / step) * step, 0, GRID.height),
+      };
+    };
+    const start = snapPoint({ x: origin.x + ux * low.t, y: origin.y + uy * low.t });
+    const finish = snapPoint({ x: origin.x + ux * high.t, y: origin.y + uy * high.t });
+    const firstLabel = cluster.find((line) => line.text?.trim())?.text || base.text || "";
+    replacements.set(base.id, {
+      ...clone(base),
+      points: [start, finish],
+      pointLinks: [
+        low.line.pointLinks?.[low.pointIndex] || "",
+        high.line.pointLinks?.[high.pointIndex] || "",
+      ],
+      text: firstLabel,
+      measurementOffsets: [],
+      hiddenMeasurements: [],
+      measurementSideOverrides: [],
+    });
+    cluster.slice(1).forEach((line) => removals.add(line.id));
+    keepSelected.push(base.id);
+  }
+
+  report.value.items = report.value.items
+    .filter((item) => !removals.has(item.id))
+    .map((item) => replacements.get(item.id) || item);
+  setSelection(keepSelected, keepSelected.at(-1) || null);
+  recordHistory();
+  notify(`${mergeable.length} overlapping wall ${mergeable.length === 1 ? "run" : "runs"} combined. Undo restores the original lines.`);
+}
+function splitSelectedLength() {
+  if (!canSplitSelectedLine.value) {
+    notify("Select one straight line to split its length into two measurements.");
+    return;
+  }
+  insertSelectedVertexAfter(0);
+  notify("Length split into two measurable sections. Drag the new center point to adjust the split.");
+}
+function unmergeSelectedPoints() {
+  if (!selectedCount.value) return;
+  const linkIds = new Set(
+    selectedItems.value.flatMap((item) => (item.pointLinks || []).filter(Boolean)),
+  );
+  if (!linkIds.size) {
+    notify("The selected shapes do not contain joined corners.");
+    return;
+  }
+  report.value.items = report.value.items.map((item) => ({
+    ...item,
+    pointLinks: (item.pointLinks || []).map((id) => (linkIds.has(id) ? "" : id)),
+  }));
+  recordHistory();
+  notify("Joined corners released.");
+}
+function handleGraphQuickAction(action) {
+  if (action === "delete") deleteSelected();
+  else if (action === "duplicate") duplicateSelected();
+  else if (action === "combine-lines") combineOverlappingLines();
+  else if (action === "split-line") splitSelectedLength();
+  else if (action === "reset-measurements") resetAllMeasurementLayout();
 }
 function deleteSelected() {
   if (!selectedCount.value) return;
@@ -472,10 +848,29 @@ function deleteSelected() {
 }
 function duplicateSelected() {
   if (!selectedCount.value) return;
+
+  // A duplicated group must be independent from the source group. The same is
+  // true for welded point ids: keeping the old ids would make editing the copy
+  // unexpectedly move vertices in the original geometry. Preserve relationships
+  // *within* the copied selection by remapping each relationship to a fresh id.
+  const groupIds = new Map();
+  const pointLinkIds = new Map();
   const duplicates = selectedItems.value.map((item) => {
     const copy = clone(item);
     copy.id = uid();
     copy.points = translatePoints(copy.points, 20, 20);
+
+    if (copy.groupId) {
+      if (!groupIds.has(copy.groupId)) groupIds.set(copy.groupId, uid());
+      copy.groupId = groupIds.get(copy.groupId);
+    }
+
+    copy.pointLinks = (copy.pointLinks || []).map((linkId) => {
+      if (!linkId) return "";
+      if (!pointLinkIds.has(linkId)) pointLinkIds.set(linkId, uid());
+      return pointLinkIds.get(linkId);
+    });
+
     return copy;
   });
   report.value.items.push(...duplicates);
@@ -493,40 +888,137 @@ function download(bytes, name, type) {
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
-async function savePreparedPdf() {
-  if (!preparedPdf.value) return;
+async function exportPortableText(text, name, contentType = "application/json") {
+  error.value = "";
+
+  // Installed Android builds bypass WebView downloads entirely. MediaStore gives us
+  // a positive success/failure result and makes the backup visible in Files > Downloads.
+  if (canUseNativeAndroidFileSave()) {
+    try {
+      const result = await saveTextToAndroidDownloads(text, name, contentType);
+      if (result?.saved) {
+        notify(`Backup saved to Downloads/Termite Fieldbook/${name}`);
+        return true;
+      }
+      if (result?.cancelled) return false;
+      throw new Error("Android did not confirm the backup write.");
+    } catch (nativeError) {
+      console.error("Direct Android backup save failed:", nativeError);
+      try {
+        const fallback = await saveTextWithNativeAndroidPicker(text, name, contentType);
+        if (fallback?.cancelled) return false;
+        if (fallback?.saved) {
+          notify("Backup saved to the location you selected.");
+          return true;
+        }
+      } catch (pickerError) {
+        console.error("Android backup picker fallback failed:", pickerError);
+      }
+      error.value =
+        "Android could not write the backup. Run ./scripts/run-android.sh once so the current native file saver is installed, then try again.";
+      return false;
+    }
+  }
+
+  const blob = new Blob([text], { type: contentType });
+
+  // Desktop Chromium can give a true save confirmation without a server.
+  if (typeof globalThis.showSaveFilePicker === "function") {
+    try {
+      const handle = await globalThis.showSaveFilePicker({
+        suggestedName: name,
+        types: [
+          {
+            description: "Termite Fieldbook backup",
+            accept: { [contentType]: [".json"] },
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      notify(`Backup saved as ${name}`);
+      return true;
+    } catch (pickerError) {
+      if (pickerError?.name === "AbortError") return false;
+      // Continue to the share/download paths when this browser exposes the API but
+      // does not allow it in the current context.
+    }
+  }
+
+  // iPhone/iPad Safari and Home Screen web apps can hand a real JSON File to the
+  // system share sheet. Choosing Save to Files gives the technician an explicit,
+  // inspectable backup location with no report server involved.
+  try {
+    const file = new File([blob], name, { type: contentType });
+    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+      await navigator.share({ files: [file], title: "Termite Fieldbook backup" });
+      notify("Backup opened in the system share sheet. Choose Save to Files to keep a copy.");
+      return true;
+    }
+  } catch (shareError) {
+    if (shareError?.name === "AbortError") return false;
+  }
+
+  // Standard browser fallback. Browsers control the final Downloads directory, so
+  // say that the download started rather than falsely claiming a path was written.
+  download(text, name, contentType);
+  notify(`Backup download started: ${name}`);
+  return true;
+}
+async function savePreparedPdf(destination = "downloads") {
+  if (!preparedPdf.value) return false;
   const name = `${filename()}.pdf`;
   const blob = new Blob([preparedPdf.value.bytes], { type: "application/pdf" });
 
-  // The installed Android app runs inside a Capacitor WebView. Browser download
-  // APIs are not a dependable "Save As" mechanism there, so use the native
-  // Storage Access Framework first. ACTION_CREATE_DOCUMENT opens Android's real
-  // location/name picker and writes only after the inspector chooses a target.
+  // Export is intentionally independent from report Save. The current in-memory
+  // inspection is rendered first, then Android writes that exact PDF to Downloads.
   if (canUseNativeAndroidFileSave()) {
     try {
-      const result = await savePdfWithNativeAndroidPicker(
-        preparedPdf.value.bytes,
-        name,
-      );
+      const result = destination === "picker"
+        ? await savePdfWithNativeAndroidPicker(preparedPdf.value.bytes, name)
+        : await savePdfToAndroidDownloads(preparedPdf.value.bytes, name);
 
       if (result?.cancelled) {
         notify("PDF save cancelled.");
-        return;
+        return false;
       }
-
       if (result?.saved) {
-        notify("PDF saved to your device.");
-        return;
+        error.value = "";
+        notify(
+          destination === "picker"
+            ? "PDF saved to the selected location."
+            : "PDF saved in Downloads/Termite Fieldbook.",
+        );
+        return true;
       }
-
       throw new Error("Android did not confirm that the PDF was saved.");
     } catch (nativeError) {
-      // Keep a visible error instead of silently pretending an <a download>
-      // worked inside the WebView. The browser/share fallbacks below still give
-      // the inspector another path if an older native project lacks the plugin.
       console.error("Native Android PDF save failed:", nativeError);
+
+      // Older native projects may have the picker method but not the new direct
+      // Downloads method yet. Fall back once so exporting still works before the
+      // user reruns the Android sync script.
+      if (destination !== "picker") {
+        try {
+          const fallback = await savePdfWithNativeAndroidPicker(preparedPdf.value.bytes, name);
+          if (fallback?.cancelled) {
+            notify("PDF save cancelled.");
+            return false;
+          }
+          if (fallback?.saved) {
+            error.value = "";
+            notify("Direct Downloads save was unavailable, so Android used the file picker instead.");
+            return true;
+          }
+        } catch (pickerError) {
+          console.error("Android PDF picker fallback failed:", pickerError);
+        }
+      }
+
       error.value =
-        "Android could not open the native PDF save picker. Run pnpm android so the native PdfSaver plugin is installed, then try again.";
+        "Android could not save the PDF. Run ./scripts/run-android.sh once so the updated native file saver is installed, then export again.";
+      return false;
     }
   }
 
@@ -548,9 +1040,9 @@ async function savePreparedPdf() {
       await writable.close();
       error.value = "";
       notify("PDF saved to your device.");
-      return;
+      return true;
     } catch (e) {
-      if (e?.name === "AbortError") return;
+      if (e?.name === "AbortError") return false;
       // Some browsers expose the API but reject it for their current context.
       // Continue into the share/download fallbacks rather than losing the PDF.
     }
@@ -562,16 +1054,15 @@ async function savePreparedPdf() {
       await navigator.share({ files: [file], title: report.value.title });
       error.value = "";
       notify("PDF sent to your device's save/share sheet.");
-      return;
+      return true;
     }
   } catch (e) {
-    if (e?.name === "AbortError") return;
+    if (e?.name === "AbortError") return false;
   }
 
-  // Browser-only final fallback. Android should normally have returned from the
-  // native picker above; this remains useful for desktop/mobile web installs.
   download(preparedPdf.value.bytes, name, "application/pdf");
   notify("PDF download started.");
+  return true;
 }
 
 function filename() {
@@ -580,17 +1071,54 @@ function filename() {
     "termite-inspection"
   );
 }
-function backup() {
-  download(
-    JSON.stringify(
-      { application: "Termite Fieldbook", report: report.value },
-      null,
-      2,
-    ),
-    `${filename()}.termite.json`,
-    "application/json",
+async function backup() {
+  const normalized = reportSchema.safeParse(report.value);
+  const backupReport = normalized.success ? normalized.data : report.value;
+  const name = `${filename()}.termite.json`;
+  const text = JSON.stringify(
+    { application: "Termite Fieldbook", report: backupReport },
+    null,
+    2,
   );
-  notify("Editable backup downloaded.");
+  return exportPortableText(text, name, "application/json");
+}
+async function backupAllSaves() {
+  const reports = localReportRecords()
+    .map((record) => readLocalReport(record.id))
+    .filter(Boolean);
+  const current = reportSchema.safeParse(report.value);
+  if (current.success) {
+    // Always place the live in-memory report into the bundle, even if an older device
+    // save with the same id already exists. Export All is also an emergency offload
+    // path for unsaved field edits when the optional report server is unavailable.
+    const currentIndex = reports.findIndex((entry) => entry.report.id === current.data.id);
+    if (currentIndex >= 0) reports.splice(currentIndex, 1);
+    reports.unshift({
+      report: current.data,
+      revision: revision.value,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  const name = `termite-fieldbook-saves-${localDate()}.json`;
+  const text = JSON.stringify(
+    {
+      application: "Termite Fieldbook",
+      format: "termite-fieldbook-backup-bundle",
+      bundleVersion: 1,
+      exportedAt: new Date().toISOString(),
+      reports,
+      credentialProfiles: credentialProfiles.value,
+      noteTemplates: noteTemplates.value,
+    },
+    null,
+    2,
+  );
+  const exported = await exportPortableText(text, name, "application/json");
+  if (exported && !canUseNativeAndroidFileSave()) {
+    // The platform-specific helper already gives the important location/action.
+    console.info(`Exported ${reports.length} Fieldbook inspection backup(s).`);
+  }
+  return exported;
 }
 async function request(path, options = {}) {
   // Allow field-save calls to fail over to the already-written local copy quickly
@@ -742,9 +1270,8 @@ function localReportRecords() {
   }
   return entries.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
 }
-function persistLocalReport(snapshot, serverRevision = revision.value) {
+function persistLocalReportEnvelope(snapshot, serverRevision = revision.value, updatedAt = new Date().toISOString()) {
   try {
-    const updatedAt = new Date().toISOString();
     localStorage.setItem(
       localReportKey(snapshot.id),
       JSON.stringify({
@@ -759,6 +1286,11 @@ function persistLocalReport(snapshot, serverRevision = revision.value) {
   } catch {
     return null;
   }
+}
+function persistLocalReport(snapshot, serverRevision = revision.value) {
+  const savedAt = persistLocalReportEnvelope(snapshot, serverRevision);
+  if (savedAt) deviceSavedAt.value = savedAt;
+  return savedAt;
 }
 function clearSavedDraft(id) {
   clearTimeout(draftTimer);
@@ -792,7 +1324,7 @@ function stashDraft() {
     );
   } catch {
     error.value =
-      "Automatic draft recovery is unavailable. Save your report or download an editable backup.";
+      "Automatic draft recovery is unavailable. Save your report or export an editable backup.";
   }
 }
 async function save() {
@@ -806,6 +1338,10 @@ async function save() {
   }
   busy.value = true;
   const snapshot = clone(result.data);
+  // Keep the live editor on the same normalized object that gets persisted. This
+  // repairs any null/sparse legacy annotation arrays immediately instead of leaving
+  // the report marked dirty again right after a successful Save.
+  report.value = clone(snapshot);
   const localSavedAt = persistLocalReport(snapshot, revision.value);
   try {
     const data = await request(`/api/reports/${snapshot.id}`, {
@@ -842,7 +1378,7 @@ async function save() {
       notify("Inspection saved on this device. Server sync is currently unavailable.");
       return true;
     }
-    error.value = `${e.message} Device storage was also unavailable; download an editable backup before leaving this page.`;
+    error.value = `${e.message} Device storage was also unavailable; export an editable backup before leaving this page.`;
     stashDraft();
     return false;
   } finally {
@@ -856,6 +1392,7 @@ function replaceReport(value, newRevision = 0, snapshot = null) {
   const normalized = reportSchema.parse(value);
   report.value = clone(normalized);
   revision.value = newRevision;
+  deviceSavedAt.value = snapshot ? new Date().toISOString() : "";
   savedSnapshot.value = snapshot || JSON.stringify(normalized);
   history.value = [JSON.stringify(normalized)];
   historyIndex.value = 0;
@@ -918,6 +1455,10 @@ async function loadRecord(record) {
   const id = typeof record === "string" ? record : record.id;
   const local = readLocalReport(id);
   if (record?.source === "device" && local) {
+    // readLocalReport() parses through the latest schema. Write that normalized
+    // copy back immediately so opening an older save upgrades it in place while
+    // preserving its report id, revision, and original saved timestamp.
+    persistLocalReportEnvelope(local.report, local.revision, local.updatedAt);
     guard(() => replaceReport(local.report, local.revision));
     return;
   }
@@ -940,27 +1481,46 @@ async function importFile(event) {
   const file = event.target.files?.[0];
   event.target.value = "";
   if (!file) return;
-  if (file.size > 3_000_000) {
-    error.value = "Choose a Fieldbook backup smaller than 3 MB.";
+  if (file.size > 25_000_000) {
+    error.value = "Choose a Fieldbook backup smaller than 25 MB.";
     return;
   }
   try {
-    const value = JSON.parse(await file.text()),
-      result = reportSchema.safeParse(value.report || value);
-    if (!result.success)
-      throw new Error("This is not a valid Fieldbook report backup.");
+    const value = JSON.parse(await file.text());
+    if (value?.format === "termite-fieldbook-backup-bundle" && Array.isArray(value.reports)) {
+      let importedCount = 0;
+      for (const envelopeValue of value.reports) {
+        const envelope = normalizeLocalReportEnvelope(envelopeValue);
+        if (!envelope) continue;
+        if (
+          persistLocalReportEnvelope(
+            envelope.report,
+            envelope.revision,
+            envelope.updatedAt || new Date().toISOString(),
+          )
+        ) importedCount++;
+      }
+      if (Array.isArray(value.credentialProfiles)) credentialProfiles.value = clone(value.credentialProfiles);
+      if (Array.isArray(value.noteTemplates)) noteTemplates.value = clone(value.noteTemplates);
+      persistFieldPresets();
+      if (!importedCount) throw new Error("This backup bundle did not contain any valid Fieldbook inspections.");
+      records.value = mergeReportRecords(records.value.filter((record) => record.source !== "device"), localReportRecords());
+      notify(`${importedCount} inspection ${importedCount === 1 ? "backup" : "backups"} imported to this device.`);
+      return;
+    }
+    const result = reportSchema.safeParse(value.report || value);
+    if (!result.success) throw new Error("This is not a valid Fieldbook report backup.");
     const imported = { ...result.data, id: uid() };
     guard(() => {
       replaceReport(imported);
       savedSnapshot.value = "";
-      notify(
-        "Backup imported as a new report. Save to keep it across devices.",
-      );
+      notify("Backup imported as a new report. Save to keep it across devices.");
     });
   } catch (e) {
     error.value = e.message;
   }
 }
+
 function restoreDraft() {
   if (!recovery.value) return;
   const draft = recovery.value;
@@ -1007,10 +1567,14 @@ async function exportPdf() {
   const result = await buildPreview();
   if (!result) return;
   preparedPdf.value = result;
+
+  // Mobile export is one action: generate the current unsaved view and immediately
+  // hand it to the native Downloads/share flow. Saving the inspection is not required.
   if (mobileFileFlow.value) {
-    notify(`${result.pageCount}-page PDF prepared. Tap Save PDF to device.`);
+    await savePreparedPdf("downloads");
     return;
   }
+
   download(result.bytes, `${filename()}.pdf`, "application/pdf");
   modal.value = null;
   notify(`${result.pageCount}-page PDF downloaded.`);
@@ -1093,7 +1657,10 @@ watch(
 watch(
   tab,
   (value) => {
-    if (value !== "graph") graph.value?.finishOutline();
+    if (value !== "graph") {
+      graph.value?.finishOutline();
+      topUiCollapsed.value = false;
+    }
   },
   { flush: "sync" },
 );
@@ -1106,6 +1673,7 @@ watch([() => JSON.stringify(report.value), paper, monochrome, tab], () => {
 watch([selectedId, selectedCount], async () => {
   if (selectedCount.value === 1 && selected.value?.type === "label") {
     panelOpen.value = true;
+    inspectorCollapsed.value = false;
     await nextTick();
     labelInput.value?.focus();
     labelInput.value?.select();
@@ -1151,7 +1719,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'theme-dark': darkMode }">
+  <div class="app-shell" :class="{ 'theme-dark': darkMode, 'top-ui-collapsed': topUiCollapsed && tab === 'graph' }">
     <header class="app-header">
       <a href="/" class="brand" @click.prevent="tab = 'graph'"
         ><span class="brand-icon company-brand-icon"><img src="/company-logo.png" alt="Apple's Environmental Pest Management Solutions" /></span
@@ -1172,8 +1740,10 @@ onBeforeUnmount(() => {
               : dirty
                 ? "Unsaved changes"
                 : revision
-                  ? "Saved inspection"
-                  : "New inspection"
+                  ? "Saved + synced"
+                  : deviceSavedAt
+                    ? "Saved on device"
+                    : "New inspection"
           }}</span
         >
       </div>
@@ -1264,10 +1834,25 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <main v-if="tab === 'graph'" class="drawing-workspace">
+    <main
+      v-if="tab === 'graph'"
+      class="drawing-workspace"
+      :class="{ 'rail-collapsed': railCollapsed, 'inspector-collapsed': inspectorCollapsed }"
+    >
       <aside class="tool-rail" aria-label="Drawing tools">
         <button
-          v-for="item in tools"
+          class="rail-collapse-control"
+          :title="railCollapsed ? 'Show drawing tools' : 'Collapse drawing tools'"
+          :aria-label="railCollapsed ? 'Show drawing tools' : 'Collapse drawing tools'"
+          @click="railCollapsed = !railCollapsed"
+        >
+          <ArrowRight v-if="railCollapsed" :size="19" />
+          <ArrowLeft v-else :size="19" />
+          <span>{{ railCollapsed ? 'Tools' : 'Hide' }}</span>
+        </button>
+        <button
+          v-for="item in quickTools"
+          v-show="!railCollapsed"
           :key="item.id"
           :class="{ active: tool === item.id }"
           :aria-pressed="tool === item.id"
@@ -1276,8 +1861,9 @@ onBeforeUnmount(() => {
         >
           <component :is="item.icon" :size="21" /><span>{{ item.label }}</span>
         </button>
-        <div class="rail-divider"></div>
+        <div v-show="!railCollapsed" class="rail-divider"></div>
         <button
+          v-show="!railCollapsed"
           :disabled="!canUndo"
           title="Undo (Ctrl+Z)"
           aria-label="Undo"
@@ -1285,6 +1871,7 @@ onBeforeUnmount(() => {
         >
           <Undo2 :size="20" /><span>Undo</span></button
         ><button
+          v-show="!railCollapsed"
           :disabled="!canRedo"
           title="Redo (Ctrl+Shift+Z)"
           aria-label="Redo"
@@ -1309,6 +1896,13 @@ onBeforeUnmount(() => {
             <span v-if="tool === 'line'" class="repeat-tool-badge">REPEAT · ESC TO FINISH</span>
             <span v-if="tool === 'curve'" class="repeat-tool-badge">DRAW CURVES · EDIT TO CLOSE / HATCH</span>
           </div>
+          <button
+            class="toolbar-pill top-collapse-action"
+            title="Hide the app header and graph controls"
+            @click="toggleTopUi"
+          >
+            <ChevronDown :size="15" class="collapse-chevron collapse-chevron-up" /> Hide top controls
+          </button>
           <div v-if="tool === 'line'" class="line-tool-controls">
             <label class="snap-toggle compact-toggle">
               <input
@@ -1332,23 +1926,51 @@ onBeforeUnmount(() => {
             class="toolbar-pill measurement-pill"
             :class="{ active: report.graphStyle.showMeasurements }"
             :aria-pressed="report.graphStyle.showMeasurements"
-            @click="setAllMeasurements(!report.graphStyle.showMeasurements)"
+            @click="setMasterMeasurements(!report.graphStyle.showMeasurements)"
           >
-            <ScanLine :size="15" /> {{ report.graphStyle.showMeasurements ? 'Measurements on' : 'Measurements off' }}
+            <ScanLine :size="15" /> {{ report.graphStyle.showMeasurements ? 'Dims on' : 'Dims off' }}
+          </button>
+          <button
+            class="toolbar-pill"
+            title="Reset every measurement to automatic placement"
+            @click="resetAllMeasurementLayout"
+          >
+            <RotateCcw :size="15" /> Reflow dims
           </button>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
               >Snap every {{ snapLabel }}</span
             ></label
           ><button
+            class="toolbar-pill canvas-focus-toggle"
+            :class="{ active: railCollapsed && inspectorCollapsed }"
+            @click="toggleCanvasFocus"
+          >
+            <Maximize :size="15" /> {{ railCollapsed && inspectorCollapsed ? 'Show panels' : 'Focus canvas' }}
+          </button>
+          <button
+            class="toolbar-pill desktop-panel-toggle"
+            @click="toggleInspector"
+          >
+            <Settings2 :size="15" /> {{ inspectorCollapsed ? 'Show tools' : 'Hide tools' }}
+          </button>
+          <button
             class="icon-button mobile-panel-toggle"
             :aria-expanded="panelOpen"
             aria-label="Show marks and selected object settings"
-            @click="panelOpen = !panelOpen"
+            @click="toggleInspector"
           >
             <Settings2 :size="19" />
           </button>
         </div>
+        <button
+          v-if="topUiCollapsed"
+          class="top-ui-restore"
+          title="Show header and graph controls"
+          @click="toggleTopUi"
+        >
+          <ChevronDown :size="17" /> Show controls
+        </button>
         <GraphEditor
           ref="graph"
           v-model:items="report.items"
@@ -1365,6 +1987,7 @@ onBeforeUnmount(() => {
           :multi-select-mode="multiSelectMode"
           @change="changeItems"
           @select-tool="setTool"
+          @quick-action="handleGraphQuickAction"
           @position="position = $event"
         />
         <div v-if="selectedCount" class="mobile-selection-actions" aria-label="Selected object actions">
@@ -1398,10 +2021,11 @@ onBeforeUnmount(() => {
             <span>ALL OBJECTS</span>
           </div>
           <div class="bulk-action-grid">
-            <button class="btn btn-secondary" @click="setAllMeasurements(true)"><ScanLine :size="15" /> Measurements on</button>
-            <button class="btn btn-secondary" @click="setAllMeasurements(false)"><ScanLine :size="15" /> Measurements off</button>
+            <button class="btn btn-secondary" @click="setAllMeasurements(true)"><ScanLine :size="15" /> Dims on</button>
+            <button class="btn btn-secondary" @click="setAllMeasurements(false)"><ScanLine :size="15" /> Dims off</button>
             <button class="btn btn-secondary" @click="setAllLabels(true)"><Type :size="15" /> Labels on</button>
             <button class="btn btn-secondary" @click="setAllLabels(false)"><Type :size="15" /> Labels off</button>
+            <button class="btn btn-secondary" @click="resetAllMeasurementLayout"><RotateCcw :size="15" /> Reflow dims</button>
           </div>
         </div>
         <template v-if="selectedCount">
@@ -1458,6 +2082,11 @@ onBeforeUnmount(() => {
                 "
               />
             </label>
+            <div v-if="selectedHasOptionalLabel && selected.text" class="annotation-controls">
+              <span>Label placement</span>
+              <p>In Select mode, drag the label text directly on the graph to place it anywhere inside or outside the shape.</p>
+              <button class="btn btn-secondary btn-mini" @click="resetSelectedLabelPosition">Reset label position</button>
+            </div>
             <div class="field-pair">
               <label class="field"
                 ><span>Text size</span
@@ -1579,6 +2208,40 @@ onBeforeUnmount(() => {
                 "
               />
             </label>
+            <div v-if="selectedSupportsMeasurement && selected.showMeasurements !== false" class="annotation-controls measurement-layout-controls">
+              <span>Measurement placement</span>
+              <p>Measurements stay attached to the wall they describe. Press and hold a value on the graph to hide it, return it to Auto, or flip it to the other side. Labels can still be moved freely.</p>
+              <div class="field-pair">
+                <label class="field">
+                  <span>Measurement side</span>
+                  <select
+                    :value="selected.measurementSide || 'normal'"
+                    @change="patchSelected('measurementSide', $event.target.value); recordHistory()"
+                  >
+                    <option value="normal">Side 1</option>
+                    <option value="opposite">Opposite side</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Distance from wall</span>
+                  <select
+                    :value="selected.measurementDistance || 0"
+                    @change="patchSelected('measurementDistance', Number($event.target.value)); recordHistory()"
+                  >
+                    <option :value="-4">Tighter</option>
+                    <option :value="0">Normal</option>
+                    <option :value="8">A little farther</option>
+                    <option :value="18">Farther</option>
+                    <option :value="30">Wide</option>
+                  </select>
+                </label>
+              </div>
+              <div class="mini-actions measurement-reset-actions">
+                <button v-if="canSplitSelectedLine" class="btn btn-secondary btn-mini" @click="splitSelectedLength">Split length</button>
+                <button class="btn btn-secondary btn-mini" @click="resetSelectedMeasurementLayout">Reset / show all dimensions</button>
+                <span v-if="selectedHiddenMeasurementCount" class="selection-chip">{{ selectedHiddenMeasurementCount }} hidden</span>
+              </div>
+            </div>
             <div v-if="selectedSupportsRotation" class="field-pair">
               <label class="field"
                 ><span>Rotation</span
@@ -1715,7 +2378,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <p class="small-help">
-              In Select mode, drag the object to move it. White round handles edit individual points; green + handles insert a midpoint on lines/outlines; square corner handles resize the whole object, including freehand drawings. The green rotate handle turns single-point symbols and labels. Arrow keys nudge by 1 px; hold Shift to nudge by 10 px.
+              In Select mode, drag the object to move it. White round handles edit individual points; tap a line/outline point to expose its red delete control, or hold it for point actions. Hold an object or dimension for the radial quick menu. Green + handles insert midpoints; square handles resize the object. Arrow keys nudge by 1 px; hold Shift to nudge by 10 px.
             </p>
             <div class="flex gap-2">
               <button
@@ -1747,9 +2410,14 @@ onBeforeUnmount(() => {
             <div class="bulk-action-grid">
               <button class="btn btn-secondary" @click="setSelectedMeasurements(true)">Measurements on</button>
               <button class="btn btn-secondary" @click="setSelectedMeasurements(false)">Measurements off</button>
+              <button class="btn btn-secondary" @click="groupSelected"><Layers :size="15" /> Group shapes</button>
+              <button class="btn btn-secondary" :disabled="!selectedHasGroup" @click="ungroupSelected">Ungroup shapes</button>
+              <button class="btn btn-secondary" :disabled="!canCombineSelectedLines" @click="combineOverlappingLines">Combine overlapping walls</button>
+              <button class="btn btn-secondary" @click="mergeSelectedPoints">Join nearby corners</button>
+              <button class="btn btn-secondary" :disabled="!selectedHasLinkedPoints" @click="unmergeSelectedPoints">Release joined corners</button>
             </div>
             <p class="small-help">
-              Drag any selected item to move the whole selection together. Use Delete to remove all selected objects, or Duplicate to copy them as a group. For detailed edits such as labels, measurements, or patterns, reduce the selection to one object.
+              Combine overlapping walls turns duplicate straight runs into one clean line and one combined measurement. Join nearby corners keeps separate shapes connected at a shared point. Grouping only makes objects move together. Undo reverses a wall combine.
             </p>
             <div class="multi-select-list">
               <span v-for="item in selectedItems" :key="item.id" class="selection-chip">{{ item.type }}</span>
@@ -1767,7 +2435,7 @@ onBeforeUnmount(() => {
         <div class="panel-heading">
           <div>
             <span class="eyebrow">ADD TO YOUR GRAPH</span>
-            <h2>Marks & labels</h2>
+            <h2>Top-down objects & marks</h2>
           </div>
           <MapPinned :size="21" class="muted" />
         </div>
@@ -1843,10 +2511,6 @@ onBeforeUnmount(() => {
             >
               <span class="door-symbol">Z</span> Crawlspace door</button
             ><button
-              @click="selectSymbol(SYMBOLS.find((s) => s.key === 'steps'))"
-            >
-              ST Steps / stair</button
-            ><button
               @click="
                 setTool('label');
                 panelOpen = false;
@@ -1883,39 +2547,81 @@ onBeforeUnmount(() => {
             <Plus :size="16" /> Add your own symbol
           </button>
         </div>
-        <div class="panel-section graph-appearance">
+        <div class="panel-section graph-appearance compact-appearance">
           <div class="section-heading">
-            <h3>Graph appearance</h3>
-            <button class="text-button compact" @click="resetGraphStyle">Reset</button>
+            <h3>Display</h3>
+            <div class="section-heading-actions">
+              <button class="icon-button compact-help" title="Measurement help" aria-label="Measurement help" @click="modal = 'measurement-help'"><HelpCircle :size="17" /></button>
+              <button class="text-button compact" @click="resetGraphStyle">Reset</button>
+            </div>
           </div>
-          <div class="graph-color-grid">
-            <label class="field"><span>Paper</span><input v-model="report.graphStyle.background" type="color" @change="recordHistory" /></label>
-            <label class="field"><span>Small grid</span><input v-model="report.graphStyle.minor" type="color" @change="recordHistory" /></label>
-            <label class="field"><span>Major grid</span><input v-model="report.graphStyle.major" type="color" @change="recordHistory" /></label>
-            <label class="field"><span>Measurements</span><input v-model="report.graphStyle.dimensions" type="color" @change="recordHistory" /></label>
+          <div class="measurement-primary-actions">
+            <button
+              class="btn btn-secondary"
+              :class="{ active: report.graphStyle.showMeasurements }"
+              @click="setMasterMeasurements(!report.graphStyle.showMeasurements)"
+            ><ScanLine :size="15" /> {{ report.graphStyle.showMeasurements ? 'Dims on' : 'Dims off' }}</button>
+            <button class="btn btn-secondary" @click="resetAllMeasurementLayout"><RotateCcw :size="15" /> Reflow dims</button>
           </div>
-          <label class="checkbox-field measurement-toggle">
-            <input v-model="report.graphStyle.showMeasurements" type="checkbox" @change="recordHistory" />
-            Master measurement visibility
-          </label>
-          <div class="bulk-settings">
-            <span>Bulk controls</span>
-            <div class="bulk-action-grid">
-              <button class="btn btn-secondary" @click="setAllMeasurements(true)">All measurements on</button>
-              <button class="btn btn-secondary" @click="setAllMeasurements(false)">All measurements off</button>
+          <details class="compact-settings">
+            <summary>Measurement options</summary>
+            <div class="measurement-display-grid">
+              <label class="field">
+                <span>Placement</span>
+                <select v-model="report.graphStyle.measurementPlacement" @change="recordHistory">
+                  <option value="smart">Smart · close to wall</option>
+                  <option value="close">Tight</option>
+                  <option value="outside">Outside</option>
+                  <option value="inline">On wall</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Crowding</span>
+                <select v-model="report.graphStyle.measurementCrowding" @change="recordHistory">
+                  <option value="clean">Clean · hide crowded values</option>
+                  <option value="all">Show every value</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Direction</span>
+                <select v-model="report.graphStyle.measurementOrientation" @change="recordHistory">
+                  <option value="horizontal">Horizontal text</option>
+                  <option value="along">Follow wall</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Boxes</span>
+                <select v-model="report.graphStyle.measurementDetail" @change="recordHistory">
+                  <option value="simplified">Width + height</option>
+                  <option value="all">Every side</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Text size</span>
+                <select v-model.number="report.graphStyle.measurementFontSize" @change="recordHistory">
+                  <option v-for="size in [5, 6, 7, 8, 9, 10, 11, 12]" :key="size" :value="size">{{ size }}</option>
+                </select>
+              </label>
+            </div>
+          </details>
+          <details class="compact-settings">
+            <summary>Colors & bulk visibility</summary>
+            <div class="graph-color-grid">
+              <label class="field"><span>Paper</span><input v-model="report.graphStyle.background" type="color" @change="recordHistory" /></label>
+              <label class="field"><span>Small grid</span><input v-model="report.graphStyle.minor" type="color" @change="recordHistory" /></label>
+              <label class="field"><span>Major grid</span><input v-model="report.graphStyle.major" type="color" @change="recordHistory" /></label>
+              <label class="field"><span>Dimensions</span><input v-model="report.graphStyle.dimensions" type="color" @change="recordHistory" /></label>
+            </div>
+            <div class="bulk-action-grid compact-bulk-grid">
+              <button class="btn btn-secondary" @click="setAllMeasurements(true)">All dims on</button>
+              <button class="btn btn-secondary" @click="setAllMeasurements(false)">All dims off</button>
               <button class="btn btn-secondary" @click="setAllLabels(true)">All labels on</button>
               <button class="btn btn-secondary" @click="setAllLabels(false)">All labels off</button>
             </div>
-          </div>
-          <label class="field">
-            <span>Measurement font size</span>
-            <select v-model.number="report.graphStyle.measurementFontSize" @change="recordHistory">
-              <option v-for="size in [6, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24]" :key="size" :value="size">{{ size }}</option>
-            </select>
-          </label>
+          </details>
         </div>
-        <div v-if="report.items.length" class="panel-section object-browser">
-          <div class="section-heading"><h3>Objects on graph</h3><span>TAP TO EDIT</span></div>
+        <details v-if="report.items.length" class="panel-section object-browser compact-settings">
+          <summary>Objects on graph <span>{{ report.items.length }}</span></summary>
           <div class="object-browser-list">
             <button
               v-for="item in report.items"
@@ -1927,7 +2633,7 @@ onBeforeUnmount(() => {
               <ArrowRight :size="15" />
             </button>
           </div>
-        </div>
+        </details>
         <div class="panel-section panel-bottom">
           <button
             class="text-button"
@@ -1935,9 +2641,7 @@ onBeforeUnmount(() => {
           >
             <MoveUpRight :size="17" /> Place north arrow
           </button>
-          <p class="small-help">
-            Your graph and notes export onto a clean, straight vector recreation of the printed form.
-          </p>
+          <button class="text-button compact" @click="modal = 'help'"><HelpCircle :size="15" /> Drawing help</button>
         </div>
       </aside>
     </main>
@@ -1946,17 +2650,21 @@ onBeforeUnmount(() => {
       <div class="page-heading">
         <div>
           <span class="eyebrow">INSPECTION RECORD</span>
-          <h1>Details & technician notes</h1>
-          <p>
-            Inspector and control statements are optional. Complete either, both, or neither as the job requires.
-          </p>
+          <h1>Details & notes</h1>
+          <p>Property, findings, and sign-off.</p>
         </div>
         <div class="page-heading-actions">
-          <button class="btn btn-secondary" @click="modal = 'presets'">Saved presets</button>
+          <button class="icon-button" title="Details & notes help" aria-label="Details & notes help" @click="modal = 'notes-help'"><HelpCircle :size="19" /></button>
+          <button class="btn btn-secondary" @click="modal = 'presets'">Presets</button>
           <button class="btn btn-secondary" @click="tab = 'graph'">
             <ArrowLeft :size="17" /> Back to graph
           </button>
         </div>
+      </div>
+      <div class="notes-summary-strip compact-summary" aria-label="Inspection details summary">
+        <span><Check v-if="report.customer" :size="14" /><strong>{{ report.customer || 'Add property' }}</strong></span>
+        <span><Check v-if="report.inspector.notes.trim()" :size="14" /><strong>{{ report.inspector.notes.trim() ? 'Inspector notes added' : 'Inspector notes optional' }}</strong></span>
+        <span><Check v-if="report.control.notes.trim()" :size="14" /><strong>{{ report.control.notes.trim() ? 'Treatment notes added' : 'Treatment notes optional' }}</strong></span>
       </div>
       <section class="property-card">
         <div class="section-heading">
@@ -2038,7 +2746,7 @@ onBeforeUnmount(() => {
                 <option value="m">meters</option>
               </select>
             </div>
-            <small class="scale-help">Snap stays accurate to {{ snapLabel }} increments. Example: 2 ft per square adds a snap point halfway through each square.</small>
+            <details class="inline-help-details"><summary>Scale help</summary><small class="scale-help">Snap stays accurate to {{ snapLabel }} increments. If one square represents 2 ft, snapping can still land halfway through the square for 1 ft increments.</small></details>
           </div>
         </div>
       </section>
@@ -2124,11 +2832,14 @@ onBeforeUnmount(() => {
       wide
       @close="modal = null"
       ><div class="modal-intro">
-        <p>Reopen a saved graph, or import an editable backup.</p>
+        <p>Reopen a saved graph, import a backup, or offload every device save in one portable bundle.</p>
         <button class="btn btn-secondary" @click="modal = 'new'">
           <Plus :size="16" /> New</button
         ><button class="btn btn-secondary" @click="fileInput.click()">
-          <Upload :size="16" /> Import backup
+          <Upload :size="16" /> Import backup(s)
+        </button>
+        <button class="btn btn-secondary" @click="backupAllSaves">
+          <Download :size="16" /> Export all saves
         </button>
       </div>
       <div v-if="loadingRecords" class="loading-state">
@@ -2158,10 +2869,14 @@ onBeforeUnmount(() => {
           ><ArrowRight :size="17" />
         </button>
       </div>
-      <button class="text-button mt-4" @click="backup">
-        <Download :size="16" /> Download current inspection as an editable
-        backup
-      </button>
+      <div class="saved-backup-actions mt-4">
+        <button class="text-button" @click="backup">
+          <Download :size="16" /> Export current backup
+        </button>
+        <button class="text-button" @click="backupAllSaves">
+          <Download :size="16" /> Export all device saves
+        </button>
+      </div>
       <p v-if="error" class="inline-error" role="alert">
         {{ error }}
       </p></ModalShell
@@ -2191,10 +2906,10 @@ onBeforeUnmount(() => {
       @close="modal = null"
       ><p class="modal-description">
         This inspection has unsaved changes. You can save it before continuing,
-        or download an editable backup.
+        or export an editable backup.
       </p>
       <button class="text-button mb-5" @click="backup">
-        <Download :size="17" /> Download backup
+        <Download :size="17" /> Export backup
       </button>
       <div class="modal-actions">
         <button class="btn btn-secondary" @click="continueAction(false)">
@@ -2271,22 +2986,25 @@ onBeforeUnmount(() => {
       </p>
       <p class="small-help">
         The preview and PDF share the same vector grid, supplied company logo, and drawing coordinates.
-        On Android, prepare the PDF first and then choose Save PDF to device to open the native Android file picker. The app does not open a browser PDF tab for saving.
+        Export uses the current inspection exactly as shown; saving the inspection first is not required. On Android, the PDF is written to Downloads/Termite Fieldbook.
         Long statements continue on additional sheets; for two-sided printing, flip on the long edge.
       </p>
       <div class="modal-actions export-actions">
-        <button class="btn btn-secondary" @click="backup">Editable backup</button>
+        <button class="btn btn-secondary" @click="backup">Export backup</button>
         <button
-          v-if="!mobileFileFlow || !preparedPdf"
           class="btn btn-primary"
           :disabled="busyPdf"
           @click="exportPdf"
         >
           <LoaderCircle v-if="busyPdf" :size="17" class="spin" /><Download v-else :size="17" />
-          {{ busyPdf ? "Preparing…" : mobileFileFlow ? "Prepare PDF" : "Download PDF" }}
+          {{ busyPdf ? "Preparing…" : mobileFileFlow ? "Export current PDF" : "Download PDF" }}
         </button>
-        <button v-else class="btn btn-primary" @click="savePreparedPdf">
-          <Download :size="17" /> Save PDF to device
+        <button
+          v-if="preparedPdf && canUseNativeAndroidFileSave()"
+          class="btn btn-secondary"
+          @click="savePreparedPdf('picker')"
+        >
+          Choose another location…
         </button>
       </div>
       <p v-if="error" class="inline-error" role="alert">
@@ -2329,6 +3047,25 @@ onBeforeUnmount(() => {
       </div>
     </ModalShell>
 
+    <ModalShell v-if="modal === 'measurement-help'" title="Measurement display" @close="modal = null">
+      <div class="concise-help">
+        <p><strong>Reflow dims</strong> returns every dimension to the recommended Smart + Clean layout and clears per-wall flips or hidden values.</p>
+        <p><strong>Clean</strong> keeps dimensions close to their wall. If a value still cannot fit clearly, it is temporarily omitted instead of being moved somewhere confusing.</p>
+        <p><strong>Show every value</strong> forces crowded dimensions to remain visible. Use it only when you need to inspect every segment.</p>
+        <p>Labels can still be moved freely because their ownership is obvious. Measurements intentionally cannot be free-dragged.</p>
+      </div>
+      <button class="btn btn-primary w-full mt-5" @click="modal = null">Done</button>
+    </ModalShell>
+    <ModalShell v-if="modal === 'notes-help'" title="Details & notes" @close="modal = null">
+      <div class="concise-help">
+        <p><strong>Property details</strong> print at the top of the inspection graph.</p>
+        <p><strong>Field/Treatment notes</strong> print on the statement page. Long notes continue automatically.</p>
+        <p><strong>Sign-off</strong> is optional and stays collapsed until you need the technician name, certification, date, or signature.</p>
+        <p>Presets are device-local shortcuts. They are also included when you export the complete device backup bundle.</p>
+      </div>
+      <button class="btn btn-primary w-full mt-5" @click="modal = null">Done</button>
+    </ModalShell>
+
     <ModalShell
       v-if="modal === 'help'"
       title="Working with your graph"
@@ -2343,11 +3080,10 @@ onBeforeUnmount(() => {
           <strong>Rounded, beveled, curved, and hatched areas</strong>Use Rounded for radius corners, Bevel for chamfered corners, Oval for circles/ellipses, Hatch polygon for irregular slabs, or Curved area for gardens and curved sidewalks. Any closed area can use diagonal, crosshatch, horizontal, or vertical marks.
         </p>
         <p>
-          <strong>Move, reshape, delete, and group</strong>Choose Select. On phones, selected objects get large touch handles plus Edit / Copy / Delete actions at the bottom. Drag a mark
-          to move it, drag its round handles to reposition individual points,
-          drag the square handles to resize, and drag the green rotate handle on
-          single-point labels or symbols to turn them. Use Shift-click on desktop
-          or Multi-select mode on touch devices to build a group selection.
+          <strong>Move, reshape, labels, and dimensions</strong>Choose Select. Drag a shape to move it, white handles to move vertices, optional geometry labels to reposition their text. Dimensions stay constrained to their wall; use Reflow, Hide, or Flip side when a dense area needs cleanup. Tap a line/outline point for its direct delete control. Press and hold a point, dimension, object, or empty canvas for context-specific radial actions and quick tools.
+        </p>
+        <p>
+          <strong>Combine, group, or join geometry</strong>Use Multi-select to select several objects. Combine overlapping walls removes duplicate straight runs and combines their measurements. Group makes shapes move together. Join nearby corners keeps separate shapes attached at one point; Release joined corners separates them again.
         </p>
         <p>
           <strong>Repeated lines</strong>Line stays active so you can trace wall
@@ -2360,9 +3096,7 @@ onBeforeUnmount(() => {
           space while Select is active. Fit restores the full grid.
         </p>
         <p>
-          <strong>Keep and print your work</strong>Save keeps the complete
-          editable inspection. An editable backup transfers it as a file. Export
-          PDF places the graph and notes on your original form.
+          <strong>Keep and print your work</strong>Save keeps the complete editable inspection. Export all saves creates one portable bundle for offloading or moving inspections between devices. Old v1 backups are upgraded as they are opened. Export PDF uses the same stored graph coordinates as the editor and preview.
         </p>
       </div>
       <div class="shortcut-grid">

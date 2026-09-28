@@ -21,7 +21,7 @@ import {
 import {
   GRAPH_CORNERS,
   PRINT_GRAPH,
-  primitives,
+  primitivesForItems,
   svgPath,
   toForm,
 } from "./geometry.js";
@@ -261,8 +261,8 @@ function graphOverlay(report, mono) {
     gridUnit: report.gridUnit,
     graphStyle: report.graphStyle,
   };
-  return report.items
-    .flatMap((item) => primitives(item, options))
+  return primitivesForItems(report.items, options)
+    .flatMap((entry) => entry.marks)
     .map((primitive) => {
       if (primitive.kind === "path")
         return {
@@ -502,25 +502,45 @@ export async function createFormPdf(
           borderWidth: mark.width,
         });
       } else {
-        const width = font.widthOfTextAtSize(mark.text, mark.size),
-          x =
-            mark.anchor === "middle"
-              ? mark.x - width / 2
-              : mark.anchor === "end"
-                ? mark.x - width
-                : mark.x,
-          baseline = mark.anchor === "middle" ? mark.y + mark.size * 0.34 : mark.y;
-        if (mark.halo)
+        const width = font.widthOfTextAtSize(mark.text, mark.size);
+        const centered = mark.anchor === "middle";
+        let x = centered
+          ? mark.x - width / 2
+          : mark.anchor === "end"
+            ? mark.x - width
+            : mark.x;
+        let drawY = height - (centered ? mark.y + mark.size * 0.34 : mark.y);
+
+        // SVG rotates centered graph labels around their stored graph coordinate. pdf-lib
+        // rotates around the text origin instead, which previously made rotated labels
+        // appear to jump during export. Rotate the origin around the same center first.
+        if (mark.graph && centered && mark.rotate) {
+          const radians = (mark.rotate * Math.PI) / 180;
+          const dx = -width / 2;
+          const dy = -mark.size * 0.34;
+          const centerX = mark.x;
+          const centerY = height - mark.y;
+          x = centerX + dx * Math.cos(radians) - dy * Math.sin(radians);
+          drawY = centerY + dx * Math.sin(radians) + dy * Math.cos(radians);
+        }
+
+        // The unrotated white backing matches the editor's text halo closely. For
+        // rotated graph labels it is omitted rather than leaving an axis-aligned box
+        // behind text that has been correctly rotated around its center.
+        if (mark.halo && !(mark.graph && mark.rotate)) {
+          const padX = mark.measurement ? 0.55 : 4;
+          const heightFactor = mark.measurement ? 0.76 : 1.2;
           page.drawRectangle({
-            x: x - 4,
-            y: height - baseline - mark.size * 0.22,
-            width: width + 8,
-            height: mark.size * 1.2,
+            x: x - padX,
+            y: drawY - mark.size * (mark.measurement ? 0.02 : 0.22),
+            width: width + padX * 2,
+            height: mark.size * heightFactor,
             color: color(mark.haloColor || "#ffffff"),
           });
+        }
         page.drawText(mark.text, {
           x,
-          y: height - baseline,
+          y: drawY,
           size: mark.size,
           font,
           color: color(mark.color),

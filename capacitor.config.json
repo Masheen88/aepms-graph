@@ -1,8 +1,5 @@
 {
   "appId": "com.applespest.termitefieldbook",
   "appName": "Apple's Termite Fieldbook",
-  "webDir": "dist/client",
-  "android": {
-    "allowMixedContent": false
-  }
+  "webDir": "dist/client"
 }
