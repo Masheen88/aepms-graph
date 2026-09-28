@@ -10,7 +10,9 @@ const props = defineProps({
   // GraphEditor can supply globally laid-out marks so dimensions avoid labels/one another.
   // Standalone callers still fall back to per-item primitive generation.
   marks: { type: Array, default: null },
+  selectedMeasurements: { type: Array, default: () => [] },
 });
+const selectedMeasurementSet = computed(() => new Set(props.selectedMeasurements || []));
 const marks = computed(() =>
   Array.isArray(props.marks)
     ? props.marks
@@ -60,8 +62,19 @@ const marks = computed(() =>
         :x="p.x"
         :y="p.y"
         :data-measurement-index="p.measurement ? p.measurementIndex : undefined"
+        :data-measurement-run-id="p.measurementRunId || undefined"
         :data-geometry-label="p.geometryLabel ? '1' : undefined"
-        :class="{ 'movable-annotation': p.geometryLabel, 'measurement-annotation': p.measurement }"
+        :class="{
+          'movable-annotation': p.geometryLabel,
+          'measurement-annotation': p.measurement,
+          'measurement-combined': p.measurementCombined,
+          'measurement-selected':
+            p.measurement &&
+            (selectedMeasurementSet.has(`${item.id}:${p.measurementIndex}`) ||
+              (p.measurementMembers || []).some((member) =>
+                selectedMeasurementSet.has(`${member.itemId}:${member.index}`),
+              )),
+        }"
         :font-size="p.size"
         :fill="p.color"
         text-anchor="middle"

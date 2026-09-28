@@ -1,20 +1,20 @@
 # Termite Fieldbook
 
-**Current project version: 1.5.4 — confirmed offline backup export, constrained/clean dimension reflow, a quieter field UI, and installable browser/iOS web-app support.**
+**Current project version: 1.5.5 — per-side measurement control, non-destructive combined measurement runs, clearer line merging, and a more consistent tool layout.**
 
 A Vite + Vue 3 Composition API app with Tailwind CSS **4.3.3**, inspired by the supplied **Termite Graph.pdf**. The editor keeps the original fieldbook workflow while rebuilding the printable form as clean vector artwork so exported geometry is no longer warped by the photographed/scanned source. Source comments describe the coordinate system, printing, persistence, patterns, measurements, and gesture handling.
 
-## What changed in 1.5.4
+## What changed in 1.5.5
 
-- **Backups no longer depend on the report server.** Current-inspection and complete-device JSON backups are generated entirely from local in-memory/device data.
-- **Android backup export is native and confirmed.** JSON backups now use the same MediaStore/Downloads bridge as PDF export. A success message is shown only after Android confirms the file write, including the exact filename under Downloads/Termite Fieldbook.
-- **Browser/iPhone backup export is explicit.** Desktop browsers use a save picker when available. iPhone/iPad Safari/Home Screen web apps use the system share sheet when file sharing is available, where **Save to Files** keeps the JSON backup. Standard browser download remains the fallback.
-- **Dimensions cannot wander away from their wall.** Smart placement is capped to a small local zone around the segment. If a dimension cannot fit there in **Clean** mode, it is temporarily omitted rather than moved several grid squares away.
-- **Reflow dims is a true recovery action.** It restores Smart + Clean placement, simplified box measurements, default sides/distances, and clears legacy position overrides.
-- **Small geometry is clearer.** One-foot/two-foot dimensions use a smaller size and thinner backing so a 1 × 1 ft box remains visible.
-- **UI is quieter.** Graph display options, colors, object lists, note shortcuts, technician presets, and sign-off details are progressively disclosed instead of occupying the screen all at once. Help dialogs explain the less-common options.
-- **Web/PWA support.** The production client includes a web-app manifest and service-worker shell cache. This provides an App-like Home Screen workflow on iPhone/iPad without shipping through the App Store.
-- **Native iOS remains available for later.** `@capacitor/ios` and `scripts/run-ios.sh` are included for teams that later choose normal Apple code signing/distribution.
+- **Each wall/side can be shown or hidden independently.** Select an object and open **Measured sides** to toggle exactly the dimensions you want. Explicitly showing a side overrides the compact width+height box default.
+- **Combine lengths without changing the drawing.** Turn on **Edit sides**, tap two or more straight touching/overlapping dimension values, then choose **Combine length**. The original walls, hatches, and shapes stay intact while one full-span dimension is rendered on screen and in the PDF.
+- **Combined totals are reversible.** Use **Separate** from Side edit, the selected-object side list, or the measurement radial menu to return a total to its original side measurements.
+- **Overlaps use geometric span, not simple addition.** Duplicate/overlapping pieces do not double-count. Touching sections extend the total, so a run such as 10 ft + 1 ft continuation becomes one 11 ft dimension.
+- **Merge selected lines is now clearly separate from Combine length.** Merge replaces compatible straight line objects that touch/overlap with one line. Combine length only changes dimension presentation and works across sides belonging to different shapes.
+- **Reflow no longer undoes deliberate cleanup.** It resets placement/side flips while preserving sides you intentionally hid and totals you intentionally combined.
+- **Tool organization is simpler.** The always-visible rail contains only core drawing/navigation tools. Hatching and specialty area shapes live together under **Area shapes & hatching** and the radial menu keeps tools separate from editing commands.
+- **Radial tools now have a More submenu.** Empty-canvas hold/Quick shows core tools first; specialty geometry is one level deeper instead of mixing drawing tools with measurement-reset commands.
+- All v1.5.4 offline backup, Android Downloads export, PWA/iPhone web-app, print-preview pan/zoom, and constrained dimension-placement behavior remains included.
 
 ## Run on Windows 11
 
@@ -38,12 +38,12 @@ The preview command serves the complete client and local report API. Opening `di
 
 ## Use the editor
 
-1. **Outline / area shapes:** tap each corner, then tap the first corner, press Enter, or choose Finish. Area draws a rectangle; Rounded adds adjustable-radius corners; Oval adds circular/elliptical areas; Hatch polygon creates irregular filled areas. Garage and Crawlspace create labeled rectangles. The quick rail now stays focused on top-down field-sketch tools; less common geometry remains in the collapsible inspector.
+1. **Outline / area shapes:** tap each corner, then tap the first corner, press Enter, or choose Finish. Area draws a rectangle; Rounded adds adjustable-radius corners; Oval adds circular/elliptical areas; Hatched outline creates irregular filled areas. Garage and Crawlspace create labeled rectangles. The quick rail now stays focused on top-down field-sketch tools; less common geometry remains in the collapsible inspector.
 2. **Select / edit:** drag any existing object to move it. Lines and outlines expose editable white vertex handles plus green midpoint **+** controls. Tap a white line/outline vertex to expose a red direct-delete control beside it; press and hold that point for Delete / Add after / Release corner radial actions. Rectangles can still be converted into four-point editable outlines when individual corners need independent movement.
-3. **Draw / patterned areas:** use a mouse, finger, or stylus to add freehand strokes. **Hatch area**, **Hatch polygon**, **Rounded area**, **Beveled area**, **Oval**, and **Curved area** cover slabs, driveways, gardens, porches, and curved sidewalks. Rectangles, lines, and outlines can use **Square**, **Rounded / radius**, or **Bevel / chamfer** corner treatment with a grid-snapped corner size. Closed shapes can use None, Diagonal, Crosshatch, Horizontal, or Vertical patterns with adjustable spacing.
-4. **Measurements:** structural segments display their calculated length from the current grid scale, including diagonals. Smart placement stays close to the measured wall. In the recommended **Clean** crowding mode, a value that cannot fit clearly is omitted rather than moved far away. Hold a dimension for **Hide**, **Auto**, and **Flip side**. **Reflow dims** restores the whole drawing to Smart + Clean automatic layout. Rectangular areas default to width + height only, with an option to show every side.
+3. **Draw / patterned areas:** use a mouse, finger, or stylus to add freehand strokes. **Hatched area**, **Hatched outline**, **Rounded area**, **Beveled area**, **Oval**, and **Curved hatched area** cover slabs, driveways, gardens, porches, and curved sidewalks. Rectangles, lines, and outlines can use **Square**, **Rounded / radius**, or **Bevel / chamfer** corner treatment with a grid-snapped corner size. Closed shapes can use None, Diagonal, Crosshatch, Horizontal, or Vertical patterns with adjustable spacing.
+4. **Measurements:** structural segments display their calculated length from the current grid scale, including diagonals. Use **Measured sides** on a selected object to show/hide individual walls, or **Edit sides** above the graph to select dimension values across objects. **Combine length** creates one non-destructive total across straight touching/overlapping sides; **Separate** reverses it. Smart/Clean placement stays near the measured wall, and **Reflow** resets placement without re-showing deliberately hidden sides or breaking combined totals.
 5. **Graph appearance / labels:** change graph paper, minor-grid, major-grid, and measurement colors. The UI itself has a persistent light/dark-mode toggle. Labels support font sizes from 6 through 72. Shape labels can be dragged independently of their geometry (including hatch-area labels), hidden without deleting their text, or reset to their automatic position.
-6. **Zoom / pan / quick tools:** scroll, use the + / - controls, or pinch with two fingers. Choose Pan, or hold Space while dragging. In Select mode, press and hold empty canvas to open the radial drawing-tool menu; on mobile the **Quick** dock button opens the same menu directly. Fit resets the view.
+6. **Zoom / pan / quick tools:** scroll, use the + / - controls, or pinch with two fingers. Choose Pan, or hold Space while dragging. In Select mode, press and hold empty canvas to open the radial drawing-tool menu; on mobile the **Quick** dock button opens the same menu directly. Core tools appear first and **More** opens specialty area/hatching tools. Fit resets the view.
 7. **Marks:** place any symbol from the printed key. The crawlspace door uses a compact Z-style field mark. Add a north arrow or your own abbreviation and description. Additional symbol definitions print on the back.
 8. **Details & notes:** property fields and notes stay primary while note shortcuts, technician presets, scale help, and sign-off controls collapse until needed. Neither technician section is required to save or export. Technician name/certificate/signature combinations can be saved as reusable device presets, and common notes can be saved as insertable templates.
 9. **Save / transfer:** always writes an editable device-local copy under `tf-native-report:<report-id>` and also syncs the report service when it is reachable. The server is optional for device work. **Export all saves** creates one portable JSON bundle containing all device inspections plus technician/note presets; on installed Android it is written directly to **Downloads/Termite Fieldbook**. **Import backup(s)** restores that bundle. Opening an older Fieldbook save runs it through the current schema and upgrades its stored device copy in place.
@@ -56,8 +56,8 @@ The drawing rail and inspector can collapse independently, **Focus canvas** hide
 | Action                         | Shortcut                               |
 | ------------------------------ | -------------------------------------- |
 | Select / Outline / Area / Line | V / O / R / L                          |
-| Rounded / Bevel / Oval / Hatch area | U / J / E / A                         |
-| Hatch polygon / curved area    | G / K                                  |
+| Rounded / Bevel / Oval / Hatched area | U / J / E / A                      |
+| Hatched outline / curved hatched area | G / K                          |
 | Curve / Draw / Label / Point / Pan | C / B / T / P / H                  |
 | Finish / cancel outline        | Enter / Escape                         |
 | Exit repeating Line tool        | Escape or V                            |
@@ -72,6 +72,10 @@ The drawing rail and inspector can collapse independently, **Focus canvas** hide
 The client can run without the report API. Device saves use browser storage, and JSON backups can be exported/imported to move work between devices. For production web use, serve `dist/client` from an **HTTPS** origin. The included manifest/service worker lets the production site behave as an installable/offline-capable web app after its assets have been cached.
 
 On iPhone or iPad, open the HTTPS site in Safari, use **Share → Add to Home Screen**, enable **Open as Web App**, and add it. This route does not require an App Store listing, Apple Developer Program membership, or Developer Mode. Backups use the system share sheet; choose **Save to Files** to keep the `.termite.json` / bundle file.
+
+### Netlify
+
+`netlify.toml` is included for the browser/PWA deployment. Connect the GitHub repository to Netlify and it will build the Vite client with `pnpm exec vite build` and publish `dist/client`. No report server is required for local device saves or JSON backup export/import. Choose the final production/custom domain before broad field use when possible because browser-local saves are scoped to the site origin.
 
 For a future native Capacitor iOS build on a Mac:
 

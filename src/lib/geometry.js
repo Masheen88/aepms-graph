@@ -163,6 +163,121 @@ function rectBasePolygon(item) {
   ];
 }
 
+/**
+ * Return the exact segment model used by dimension rendering.
+ * Keeping this shared lets the inspector, radial controls, PDF, and live graph
+ * all refer to the same "side 1 / side 2" indexes.
+ */
+export function measurementSegmentsForItem(item) {
+  if (!item || !["rect", "ellipse", "outline", "line", "curve"].includes(item.type))
+    return [];
+  let points = item.points || [];
+  let closed = item.closed === true;
+  if (["rect", "ellipse"].includes(item.type)) {
+    points = rectBasePolygon(item);
+    closed = true;
+  }
+  if (points.length < 2) return [];
+  const segments = points.slice(0, -1).map((point, index) => ({
+    index,
+    a: point,
+    b: points[index + 1],
+  }));
+  if (closed) {
+    segments.push({
+      index: points.length - 1,
+      a: points.at(-1),
+      b: points[0],
+    });
+  }
+  return segments.map((segment) => ({
+    ...segment,
+    length: Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y),
+  }));
+}
+
+export function measurementSegmentForItem(item, index) {
+  return measurementSegmentsForItem(item).find((segment) => segment.index === index) || null;
+}
+
+export function formatMeasurementLength(worldLength, feetPerSquare = 1, gridUnit = "ft") {
+  const scaled = (worldLength / GRID.step) * feetPerSquare;
+  const rounded =
+    Math.abs(scaled - Math.round(scaled)) < 0.05
+      ? Math.round(scaled)
+      : Number(scaled.toFixed(1));
+  return `${rounded} ${gridUnit}`;
+}
+
+/**
+ * Resolve several sides into one straight touching/overlapping measurement span.
+ * Geometry is not changed. This is intentionally strict enough that a dimension can
+ * never jump across an actual gap or around a corner.
+ */
+export function combinedMeasurementSpan(segments, tolerance = 2.5) {
+  const usable = (segments || []).filter(
+    (segment) =>
+      segment?.a &&
+      segment?.b &&
+      Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y) > 0.01,
+  );
+  if (usable.length < 2) return null;
+
+  const first = usable[0];
+  const dx = first.b.x - first.a.x;
+  const dy = first.b.y - first.a.y;
+  const baseLength = Math.hypot(dx, dy);
+  const ux = dx / baseLength;
+  const uy = dy / baseLength;
+  const origin = first.a;
+
+  const intervals = [];
+  for (const segment of usable) {
+    const sx = segment.b.x - segment.a.x;
+    const sy = segment.b.y - segment.a.y;
+    const length = Math.hypot(sx, sy);
+    const vx = sx / length;
+    const vy = sy / length;
+    // Parallel or reversed is valid. A noticeable angle means these are different walls.
+    if (Math.abs(ux * vy - uy * vx) > 0.035) return null;
+
+    const distanceToBase = (point) =>
+      Math.abs((point.x - origin.x) * uy - (point.y - origin.y) * ux);
+    if (distanceToBase(segment.a) > tolerance || distanceToBase(segment.b) > tolerance)
+      return null;
+
+    const project = (point) =>
+      (point.x - origin.x) * ux + (point.y - origin.y) * uy;
+    const a = project(segment.a);
+    const b = project(segment.b);
+    intervals.push({ min: Math.min(a, b), max: Math.max(a, b) });
+  }
+
+  intervals.sort((a, b) => a.min - b.min || a.max - b.max);
+  let unionMin = intervals[0].min;
+  let unionMax = intervals[0].max;
+  for (const interval of intervals.slice(1)) {
+    if (interval.min > unionMax + tolerance) return null;
+    unionMax = Math.max(unionMax, interval.max);
+  }
+
+  const a = {
+    x: origin.x + ux * unionMin,
+    y: origin.y + uy * unionMin,
+  };
+  const b = {
+    x: origin.x + ux * unionMax,
+    y: origin.y + uy * unionMax,
+  };
+  return {
+    a,
+    b,
+    length: Math.hypot(b.x - a.x, b.y - a.y),
+    ux,
+    uy,
+  };
+}
+
 function rectanglePolygon(item) {
   // Rectangles store only opposite corners for fast resizing. Expand them to four
   // vertices before applying the same round/bevel logic used by editable outlines.
@@ -251,13 +366,16 @@ function measurementText(result, item, points, closed, options, allowedIndexes =
   const segments = points.slice(0, -1).map((point, i) => [point, points[i + 1]]);
   if (closed) segments.push([points.at(-1), points[0]]);
   const hidden = new Set(item.hiddenMeasurements || []);
+  const explicitlyShown = new Set(item.shownMeasurements || []);
   for (const [index, [a, b]] of segments.entries()) {
-    if (hidden.has(index) || (allowedIndexes && !allowedIndexes.has(index))) continue;
+    if (
+      hidden.has(index) ||
+      (allowedIndexes && !allowedIndexes.has(index) && !explicitlyShown.has(index))
+    )
+      continue;
     const worldLength = Math.hypot(b.x - a.x, b.y - a.y);
     if (worldLength < 2) continue;
-    const scaled = (worldLength / GRID.step) * feetPerSquare,
-      rounded = Math.abs(scaled - Math.round(scaled)) < 0.05 ? Math.round(scaled) : Number(scaled.toFixed(1)),
-      configuredSize = Number(graphStyle.measurementFontSize || 6),
+    const configuredSize = Number(graphStyle.measurementFontSize || 6),
       // Short details are common around porches, piers, and one-foot boxes. Keep
       // the value legible without letting the text/halo visually replace the wall.
       measurementSize = worldLength <= GRID.step * 1.25
@@ -292,7 +410,7 @@ function measurementText(result, item, points, closed, options, allowedIndexes =
       hasManualOffset = false;
     result.push({
       kind: "text",
-      text: `${rounded} ${gridUnit}`,
+      text: formatMeasurementLength(worldLength, feetPerSquare, gridUnit),
       x: clamp(
         midpoint.x + nx * distance + Number(manual.x || 0),
         measurementSize * 1.7,
@@ -320,6 +438,7 @@ function measurementText(result, item, points, closed, options, allowedIndexes =
         return angle;
       })(),
       measurementIndex: index,
+      measurementRunId: item.measurementRunIds?.[index] || "",
       // Layout metadata is ignored by the SVG/PDF painters but lets the shared smart
       // measurement pass resolve collisions identically on screen and in exported PDFs.
       measurementManual: hasManualOffset,
@@ -348,6 +467,15 @@ function simplifiedMeasurementIndexes(item, points, graphStyle) {
     Math.abs(Math.hypot(vectors[0].x, vectors[0].y) - Math.hypot(vectors[2].x, vectors[2].y)) < 0.05 &&
     Math.abs(Math.hypot(vectors[1].x, vectors[1].y) - Math.hypot(vectors[3].x, vectors[3].y)) < 0.05;
   return orthogonal && oppositeMatch ? new Set([0, 1]) : null;
+}
+
+export function defaultMeasurementIndexesForItem(item, graphStyle = DEFAULT_GRAPH_STYLE) {
+  if (!item) return null;
+  if (["rect", "ellipse"].includes(item.type)) {
+    const points = rectBasePolygon(item);
+    return simplifiedMeasurementIndexes(item, points, graphStyle);
+  }
+  return simplifiedMeasurementIndexes(item, item.points || [], graphStyle);
 }
 
 export function primitives(item, options = {}) {
@@ -578,9 +706,103 @@ function boxOverlapArea(a, b) {
  */
 export function primitivesForItems(items, options = {}) {
   const graphStyle = options.graphStyle || DEFAULT_GRAPH_STYLE;
-  const entries = items.map((item) => ({ id: item.id, marks: primitives(item, options) }));
+  const entries = items.map((item) => ({
+    id: item.id,
+    marks: primitives(item, options).map((mark) =>
+      mark.measurement ? { ...mark, measurementItemId: item.id } : mark,
+    ),
+  }));
   const reserved = [];
   const seenMeasurementSegments = new Set();
+
+  // Combined measurement runs are non-destructive. The source shapes keep every wall
+  // and hatch boundary; only their dimension labels are replaced by one full-span value.
+  // If later edits make the run non-collinear or introduce a real gap, the combined
+  // dimension automatically falls back to the original individual measurements.
+  const runMembers = new Map();
+  for (const entry of entries) {
+    for (const mark of entry.marks) {
+      if (!mark.measurement || !mark.measurementRunId || !mark.measurementSegment) continue;
+      if (!runMembers.has(mark.measurementRunId)) runMembers.set(mark.measurementRunId, []);
+      runMembers.get(mark.measurementRunId).push({ entry, mark });
+    }
+  }
+
+  for (const [runId, members] of runMembers) {
+    if (members.length < 2) continue;
+    const span = combinedMeasurementSpan(
+      members.map(({ mark }) => mark.measurementSegment),
+      Math.max(2, GRID.step * 0.22),
+    );
+    if (!span) continue;
+
+    const primary = members[0];
+    const source = primary.mark;
+    const dx = span.b.x - span.a.x;
+    const dy = span.b.y - span.a.y;
+    const length = Math.max(1, span.length);
+    const midpoint = {
+      x: (span.a.x + span.b.x) / 2,
+      y: (span.a.y + span.b.y) / 2,
+    };
+    const configuredSize = Number(graphStyle.measurementFontSize || 6);
+    const size =
+      length <= GRID.step * 1.25
+        ? Math.min(configuredSize, 4.6)
+        : length <= GRID.step * 2.1
+          ? Math.min(configuredSize, 5.1)
+          : configuredSize;
+    const sourceLayout = source.measurementLayout || {};
+    const sourceNormal = {
+      x: Number(sourceLayout.nx ?? (-dy / length)),
+      y: Number(sourceLayout.ny ?? (dx / length)),
+    };
+    const sourceDistance = Number(sourceLayout.distance ?? Math.max(3.2, size * 0.46));
+    let angle = 0;
+    if ((graphStyle.measurementOrientation || "horizontal") === "along") {
+      angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+      if (angle > 90) angle -= 180;
+      if (angle < -90) angle += 180;
+    }
+
+    const combined = {
+      ...source,
+      text: formatMeasurementLength(span.length, options.feetPerSquare || 1, options.gridUnit || "ft"),
+      x: clamp(
+        midpoint.x + sourceNormal.x * sourceDistance,
+        size * 1.7,
+        GRID.width - size * 1.7,
+      ),
+      y: clamp(
+        midpoint.y + sourceNormal.y * sourceDistance,
+        size * 1.3,
+        GRID.height - size * 1.3,
+      ),
+      size,
+      rotate: angle,
+      measurementCombined: true,
+      measurementRunId: runId,
+      measurementSegment: { a: span.a, b: span.b },
+      measurementMembers: members.map(({ mark }) => ({
+        itemId: mark.measurementItemId,
+        index: mark.measurementIndex,
+      })),
+      measurementLayout: {
+        midpoint,
+        nx: sourceNormal.x,
+        ny: sourceNormal.y,
+        tx: dx / length,
+        ty: dy / length,
+        distance: sourceDistance,
+      },
+    };
+
+    const memberMarks = new Set(members.map(({ mark }) => mark));
+    for (const member of members) {
+      member.entry.marks = member.entry.marks.filter((mark) => !memberMarks.has(mark));
+    }
+    primary.entry.marks.push(combined);
+  }
 
   // Exact overlapping walls can exist in recovered/older drawings. Keep the wall
   // geometry intact, but render only one dimension for the same exact segment so

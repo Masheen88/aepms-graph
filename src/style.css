@@ -3757,7 +3757,7 @@ kbd {
   }
 }
 
-/* v1.5.4: keep the field UI concise while leaving advanced drafting controls nearby. */
+/* v1.5.5: keep field controls concise while exposing per-side dimensions and grouped tool families. */
 .section-heading-actions,
 .measurement-primary-actions {
   display: flex;
@@ -3886,6 +3886,167 @@ kbd {
     min-height: 34px;
   }
   .measurement-primary-actions .btn {
+    min-height: 42px;
+  }
+}
+
+/* v1.5.5 side-dimension workflow -------------------------------------------------
+   Dimension editing is now side-first: individual wall visibility lives with the
+   selected object, while cross-object totals are created directly on the canvas. */
+.measurement-edit-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid #c9dcdd;
+  border-top: 0;
+  background: #f4faf8;
+}
+.measurement-edit-copy {
+  display: grid;
+  min-width: 170px;
+  margin-right: auto;
+}
+.measurement-edit-copy strong {
+  color: #244f55;
+  font-size: 0.82rem;
+}
+.measurement-edit-copy span {
+  color: #6f858a;
+  font-size: 0.7rem;
+}
+.measurement-object-controls {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.measured-sides > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.measured-sides > summary small {
+  margin-left: auto;
+  color: #71878c;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+.measurement-side-list {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+}
+.measurement-side-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 4px 6px;
+  border: 1px solid #e2eaeb;
+  border-radius: 7px;
+  background: #fff;
+}
+.measurement-side-row > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+.measurement-side-row input {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+}
+.measurement-side-row label > span {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.measurement-side-row strong {
+  color: #2d5056;
+  font-size: 0.76rem;
+}
+.measurement-side-row small {
+  color: #7d9094;
+  font-size: 0.68rem;
+}
+.side-run-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid #bcd5d2;
+  border-radius: 999px;
+  background: #edf7f4;
+  color: #246b65;
+  font-size: 0.63rem;
+  font-weight: 750;
+}
+.measurement-side-actions {
+  padding-top: 7px;
+}
+.measurement-position-body {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+}
+.measurement-selected {
+  fill: #0f756f !important;
+  stroke-width: 2.1 !important;
+  font-weight: 800;
+}
+.measurement-combined {
+  font-weight: 700;
+}
+.tool-family-panel {
+  display: grid;
+  gap: 10px;
+}
+.tool-family {
+  margin-top: 0;
+}
+.nested-tool-buttons {
+  margin-top: 8px;
+}
+.theme-dark .measurement-edit-bar {
+  border-color: #385056;
+  background: #13262a;
+}
+.theme-dark .measurement-edit-copy strong,
+.theme-dark .measurement-side-row strong {
+  color: #d7e5e6;
+}
+.theme-dark .measurement-edit-copy span,
+.theme-dark .measurement-side-row small,
+.theme-dark .measured-sides > summary small {
+  color: #9fb1b5;
+}
+.theme-dark .measurement-side-row {
+  border-color: #34494e;
+  background: #15272c;
+}
+.theme-dark .side-run-button {
+  border-color: #3d625f;
+  background: #17322f;
+  color: #a9d8d1;
+}
+
+@media (max-width: 720px) {
+  .measurement-edit-bar {
+    align-items: stretch;
+  }
+  .measurement-edit-copy {
+    flex: 1 1 100%;
+  }
+  .measurement-edit-bar .btn {
+    flex: 1 1 auto;
+  }
+  .measurement-side-row {
     min-height: 42px;
   }
 }

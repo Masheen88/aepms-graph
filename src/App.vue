@@ -24,6 +24,7 @@ import {
   HelpCircle,
   House,
   Layers,
+  Link2,
   LoaderCircle,
   MapPinned,
   Maximize,
@@ -42,6 +43,7 @@ import {
   Trash2,
   Type,
   Undo2,
+  Unlink,
   Upload,
   X,
 } from "lucide-vue-next";
@@ -62,7 +64,17 @@ import {
   SYMBOLS,
   uid,
 } from "./lib/model.js";
-import { bounds, clamp, snapStepForScale, translatePoints } from "./lib/geometry.js";
+import {
+  bounds,
+  clamp,
+  combinedMeasurementSpan,
+  defaultMeasurementIndexesForItem,
+  formatMeasurementLength,
+  measurementSegmentForItem,
+  measurementSegmentsForItem,
+  snapStepForScale,
+  translatePoints,
+} from "./lib/geometry.js";
 import {
   canUseNativeAndroidFileSave,
   savePdfToAndroidDownloads,
@@ -87,7 +99,9 @@ const tab = ref("graph"),
   inspectorCollapsed = ref(false),
   topUiCollapsed = ref(false),
   lineAutoConnect = ref(true),
-  multiSelectMode = ref(false);
+  multiSelectMode = ref(false),
+  measurementEditMode = ref(false),
+  selectedMeasurementRefs = ref([]);
 const graph = ref(null),
   fileInput = ref(null),
   labelInput = ref(null),
@@ -164,6 +178,103 @@ const selectedSupportsMeasurement = computed(() =>
 const selectedHiddenMeasurementCount = computed(() =>
   selected.value?.hiddenMeasurements?.length || 0,
 );
+const selectedSupportsSideControls = computed(() =>
+  ["rect", "ellipse", "outline", "line"].includes(selected.value?.type),
+);
+const selectedMeasurementSides = computed(() => {
+  const item = selected.value;
+  if (!item || !selectedSupportsSideControls.value) return [];
+  const names =
+    ["rect", "ellipse"].includes(item.type)
+      ? ["Top", "Right", "Bottom", "Left"]
+      : item.type === "line"
+        ? ["Length"]
+        : [];
+  const hidden = new Set(item.hiddenMeasurements || []);
+  const explicitlyShown = new Set(item.shownMeasurements || []);
+  const defaultIndexes = defaultMeasurementIndexesForItem(
+    item,
+    report.value.graphStyle,
+  );
+  return measurementSegmentsForItem(item).map((segment) => ({
+    ...segment,
+    name: names[segment.index] || `Side ${segment.index + 1}`,
+    text: formatMeasurementLength(
+      segment.length,
+      report.value.feetPerSquare,
+      report.value.gridUnit,
+    ),
+    visible:
+      !hidden.has(segment.index) &&
+      (!defaultIndexes ||
+        defaultIndexes.has(segment.index) ||
+        explicitlyShown.has(segment.index)),
+    runId: item.measurementRunIds?.[segment.index] || "",
+  }));
+});
+
+const selectedShownMeasurementCount = computed(
+  () => selectedMeasurementSides.value.filter((side) => side.visible).length,
+);
+const selectedMeasurementCount = computed(() => selectedMeasurementRefs.value.length);
+function measurementRefKey(itemId, index) {
+  return `${itemId}:${index}`;
+}
+function parseMeasurementRef(key) {
+  const separator = key.lastIndexOf(":");
+  return {
+    itemId: key.slice(0, separator),
+    index: Number(key.slice(separator + 1)),
+  };
+}
+function measurementRunMemberRefs(runId) {
+  if (!runId) return [];
+  return report.value.items.flatMap((item) =>
+    (item.measurementRunIds || [])
+      .map((currentRunId, index) => ({
+        itemId: item.id,
+        index,
+        currentRunId,
+      }))
+      .filter((entry) => entry.currentRunId === runId)
+      .map((entry) => measurementRefKey(entry.itemId, entry.index)),
+  );
+}
+const selectedMeasurementSegments = computed(() =>
+  selectedMeasurementRefs.value
+    .map(parseMeasurementRef)
+    .map((ref) => {
+      const item = report.value.items.find((entry) => entry.id === ref.itemId);
+      const segment = measurementSegmentForItem(item, ref.index);
+      return segment ? { ...ref, item, segment } : null;
+    })
+    .filter(Boolean),
+);
+const selectedMeasurementSpan = computed(() =>
+  selectedMeasurementSegments.value.length >= 2
+    ? combinedMeasurementSpan(
+        selectedMeasurementSegments.value.map((entry) => entry.segment),
+        Math.max(2, GRID.step * 0.22),
+      )
+    : null,
+);
+const selectedMeasurementTotal = computed(() =>
+  selectedMeasurementSpan.value
+    ? formatMeasurementLength(
+        selectedMeasurementSpan.value.length,
+        report.value.feetPerSquare,
+        report.value.gridUnit,
+      )
+    : "",
+);
+const canCombineSelectedMeasurements = computed(
+  () => selectedMeasurementCount.value >= 2 && Boolean(selectedMeasurementSpan.value),
+);
+const selectedMeasurementHasRun = computed(() =>
+  selectedMeasurementSegments.value.some(
+    ({ item, index }) => Boolean(item.measurementRunIds?.[index]),
+  ),
+);
 const selectedSupportsClosedShape = computed(() =>
   ["outline", "curve", "freehand"].includes(selected.value?.type),
 );
@@ -220,11 +331,11 @@ const tools = [
   { id: "rounded", label: "Rounded", icon: Square, key: "U" },
   { id: "beveled", label: "Bevel", icon: Square, key: "J" },
   { id: "ellipse", label: "Oval", icon: Circle, key: "E" },
-  { id: "hatch", label: "Hatch area", icon: Grid2X2, key: "A" },
-  { id: "hatchpoly", label: "Hatch polygon", icon: Grid2X2, key: "G" },
+  { id: "hatch", label: "Hatched area", icon: Grid2X2, key: "A" },
+  { id: "hatchpoly", label: "Hatched outline", icon: Grid2X2, key: "G" },
   { id: "line", label: "Line", icon: MoveUpRight, key: "L" },
   { id: "curve", label: "Curve", icon: Pencil, key: "C" },
-  { id: "curvearea", label: "Curved area", icon: Pencil, key: "K" },
+  { id: "curvearea", label: "Curved hatched area", icon: Pencil, key: "K" },
   { id: "freehand", label: "Draw", icon: Pencil, key: "B" },
   { id: "label", label: "Label", icon: Type, key: "T" },
   { id: "point", label: "Point", icon: Circle, key: "P" },
@@ -232,7 +343,7 @@ const tools = [
 ];
 // Keep the always-visible rail focused on the tools used most during a top-down field sketch.
 // Advanced geometry stays one tap away in the inspector instead of filling the whole screen.
-const QUICK_TOOL_IDS = new Set(["select", "outline", "line", "rect", "hatch", "label", "pan"]);
+const QUICK_TOOL_IDS = new Set(["select", "outline", "line", "rect", "label", "pan"]);
 const quickTools = tools.filter((item) => QUICK_TOOL_IDS.has(item.id));
 const LOCAL_REPORT_PREFIX = "tf-native-report:";
 
@@ -291,7 +402,11 @@ function changeItems(items) {
 function setTool(value) {
   tool.value = value;
   error.value = "";
-  if (value !== "select") multiSelectMode.value = false;
+  if (value !== "select") {
+    multiSelectMode.value = false;
+    measurementEditMode.value = false;
+    selectedMeasurementRefs.value = [];
+  }
 }
 function toggleMultiSelectMode() {
   multiSelectMode.value = !multiSelectMode.value;
@@ -342,6 +457,198 @@ function setAllMeasurements(value) {
   recordHistory();
   notify(value ? "Measurements enabled for all measurable objects." : "Measurements hidden for all objects.");
 }
+function toggleMeasurementEditMode() {
+  measurementEditMode.value = !measurementEditMode.value;
+  selectedMeasurementRefs.value = [];
+  if (measurementEditMode.value) {
+    tool.value = "select";
+    multiSelectMode.value = false;
+    report.value.graphStyle.showMeasurements = true;
+    notify("Side edit: tap measurement values to select the sides you want to manage.");
+  }
+}
+
+function toggleMeasurementSelection(payload) {
+  const refs = payload.runId
+    ? measurementRunMemberRefs(payload.runId)
+    : [measurementRefKey(payload.itemId, payload.index)];
+  const current = new Set(selectedMeasurementRefs.value);
+  const allSelected = refs.every((key) => current.has(key));
+  for (const key of refs) {
+    if (allSelected) current.delete(key);
+    else current.add(key);
+  }
+  selectedMeasurementRefs.value = [...current];
+}
+
+function denseStringValue(source, index, value = "") {
+  const next = Array.isArray(source) ? [...source] : [];
+  while (next.length <= index) next.push("");
+  next[index] = value;
+  return next;
+}
+
+function clearMeasurementRun(runId, { record = false } = {}) {
+  if (!runId) return;
+  report.value.items = report.value.items.map((item) => {
+    if (!(item.measurementRunIds || []).includes(runId)) return item;
+    return {
+      ...item,
+      measurementRunIds: (item.measurementRunIds || []).map((id) =>
+        id === runId ? "" : id,
+      ),
+    };
+  });
+  if (record) recordHistory();
+}
+
+function setSelectedMeasurementSideVisible(index, visible) {
+  const item = selected.value;
+  if (!item) return;
+  const runId = item.measurementRunIds?.[index] || "";
+  // Editing one member means the user is managing that side independently, so
+  // separate an existing combined total first rather than leaving a stale run id.
+  if (runId) clearMeasurementRun(runId);
+  const hidden = new Set(item.hiddenMeasurements || []);
+  const shown = new Set(item.shownMeasurements || []);
+  if (visible) {
+    hidden.delete(index);
+    // Explicit show overrides the compact width+height default for boxes/outlines.
+    shown.add(index);
+  } else {
+    hidden.add(index);
+    shown.delete(index);
+  }
+  item.hiddenMeasurements = [...hidden].sort((a, b) => a - b);
+  item.shownMeasurements = [...shown].sort((a, b) => a - b);
+  if (visible) {
+    item.showMeasurements = true;
+    report.value.graphStyle.showMeasurements = true;
+  }
+  recordHistory();
+}
+
+function showAllSelectedMeasurementSides() {
+  if (!selected.value) return;
+  const indexes = measurementSegmentsForItem(selected.value).map(
+    (segment) => segment.index,
+  );
+  selected.value.hiddenMeasurements = [];
+  selected.value.shownMeasurements = indexes;
+  selected.value.showMeasurements = true;
+  report.value.graphStyle.showMeasurements = true;
+  recordHistory();
+  notify("All sides on this object are visible.");
+}
+
+function separateMeasurementRun(runId) {
+  if (!runId) return;
+  clearMeasurementRun(runId, { record: true });
+  selectedMeasurementRefs.value = selectedMeasurementRefs.value.filter((key) => {
+    const ref = parseMeasurementRef(key);
+    const item = report.value.items.find((entry) => entry.id === ref.itemId);
+    return item?.measurementRunIds?.[ref.index];
+  });
+  notify("Combined length separated back into its individual sides.");
+}
+
+function combineSelectedMeasurementSides() {
+  if (selectedMeasurementCount.value < 2) {
+    notify("Tap at least two measurement values first.");
+    return;
+  }
+  if (!selectedMeasurementSpan.value) {
+    notify("Those sides do not form one straight touching or overlapping run.");
+    return;
+  }
+
+  // If the selection contains an existing combined total, remove its previous id
+  // before assigning the new run. Tapping a combined value selects all of its members.
+  const oldRunIds = new Set(
+    selectedMeasurementSegments.value
+      .map(({ item, index }) => item.measurementRunIds?.[index] || "")
+      .filter(Boolean),
+  );
+  for (const runId of oldRunIds) clearMeasurementRun(runId);
+
+  const combinedTotal = selectedMeasurementTotal.value;
+  const runId = uid();
+  const selectedKeys = new Set(selectedMeasurementRefs.value);
+  report.value.items = report.value.items.map((item) => {
+    let changed = false;
+    let measurementRunIds = [...(item.measurementRunIds || [])];
+    let hiddenMeasurements = [...(item.hiddenMeasurements || [])];
+    let shownMeasurements = [...(item.shownMeasurements || [])];
+    measurementSegmentsForItem(item).forEach((segment) => {
+      const key = measurementRefKey(item.id, segment.index);
+      if (!selectedKeys.has(key)) return;
+      measurementRunIds = denseStringValue(measurementRunIds, segment.index, runId);
+      hiddenMeasurements = hiddenMeasurements.filter((value) => value !== segment.index);
+      shownMeasurements = [...new Set([...shownMeasurements, segment.index])];
+      changed = true;
+    });
+    return changed
+      ? {
+          ...item,
+          showMeasurements: true,
+          measurementRunIds,
+          hiddenMeasurements,
+          shownMeasurements,
+        }
+      : item;
+  });
+  report.value.graphStyle.showMeasurements = true;
+  recordHistory();
+  selectedMeasurementRefs.value = [];
+  notify(`Combined into one ${combinedTotal} measurement.`);
+}
+
+function hideSelectedMeasurementSides() {
+  if (!selectedMeasurementCount.value) return;
+  const keys = new Set(selectedMeasurementRefs.value);
+  const affectedRunIds = new Set(
+    selectedMeasurementSegments.value
+      .map(({ item, index }) => item.measurementRunIds?.[index] || "")
+      .filter(Boolean),
+  );
+  // Hiding only part of a total would make the combined value wrong. Separate those
+  // runs first, then hide exactly the selected sides.
+  for (const runId of affectedRunIds) clearMeasurementRun(runId);
+  report.value.items = report.value.items.map((item) => {
+    const indexes = measurementSegmentsForItem(item)
+      .filter((segment) => keys.has(measurementRefKey(item.id, segment.index)))
+      .map((segment) => segment.index);
+    if (!indexes.length) return item;
+    return {
+      ...item,
+      hiddenMeasurements: [
+        ...new Set([...(item.hiddenMeasurements || []), ...indexes]),
+      ].sort((a, b) => a - b),
+      shownMeasurements: (item.shownMeasurements || []).filter(
+        (index) => !indexes.includes(index),
+      ),
+    };
+  });
+  recordHistory();
+  selectedMeasurementRefs.value = [];
+  notify("Selected measurement sides hidden.");
+}
+
+function separateSelectedMeasurementSides() {
+  const runIds = new Set(
+    selectedMeasurementSegments.value
+      .map(({ item, index }) => item.measurementRunIds?.[index] || "")
+      .filter(Boolean),
+  );
+  if (!runIds.size) {
+    notify("The selected sides are not part of a combined length.");
+    return;
+  }
+  for (const runId of runIds) clearMeasurementRun(runId);
+  recordHistory();
+  selectedMeasurementRefs.value = [];
+  notify("Combined lengths separated.");
+}
 function resetAllMeasurementLayout() {
   // Reflow means one predictable, readable layout. Earlier builds only cleared stored
   // offsets, while the collision solver itself could still move a value several feet
@@ -354,7 +661,8 @@ function resetAllMeasurementLayout() {
       ? {
           ...item,
           measurementOffsets: [],
-          hiddenMeasurements: [],
+          // Reflow only fixes placement. Deliberately hidden sides and combined
+          // measurement runs are user choices and must survive a layout reset.
           measurementSideOverrides: [],
           measurementDistance: 0,
           measurementSide: "normal",
@@ -362,7 +670,7 @@ function resetAllMeasurementLayout() {
       : item,
   );
   recordHistory();
-  notify("Dimensions reflowed close to their walls. Crowded values are hidden instead of moved far away.");
+  notify("Dimensions reflowed close to their walls. Hidden sides and combined totals were kept.");
 }
 
 function setSelectedMeasurements(value) {
@@ -425,6 +733,8 @@ function patchSelectedRotation(value) {
 }
 function selectSymbol(symbol) {
   currentSymbol.value = symbol;
+  measurementEditMode.value = false;
+  selectedMeasurementRefs.value = [];
   tool.value = "symbol";
   panelOpen.value = false;
 }
@@ -485,7 +795,9 @@ function deleteSelectedVertex(index) {
   selected.value.pointLinks = pointLinks;
   selected.value.measurementOffsets = [];
   selected.value.hiddenMeasurements = [];
+  selected.value.shownMeasurements = [];
   selected.value.measurementSideOverrides = [];
+  selected.value.measurementRunIds = [];
   recordHistory();
 }
 function insertSelectedVertexAfter(index) {
@@ -517,7 +829,9 @@ function insertSelectedVertexAfter(index) {
   selected.value.pointLinks = pointLinks;
   selected.value.measurementOffsets = [];
   selected.value.hiddenMeasurements = [];
+  selected.value.shownMeasurements = [];
   selected.value.measurementSideOverrides = [];
+  selected.value.measurementRunIds = [];
   recordHistory();
 }
 function patchSelectedCornerStyle(value) {
@@ -551,7 +865,9 @@ function convertSelectedRectToOutline() {
   selected.value.pointLinks = ["", "", "", ""];
   selected.value.measurementOffsets = [];
   selected.value.hiddenMeasurements = [];
+  selected.value.shownMeasurements = [];
   selected.value.measurementSideOverrides = [];
+  selected.value.measurementRunIds = [];
   recordHistory();
   notify("Rectangle converted to an editable 4-point outline.");
 }
@@ -564,12 +880,12 @@ function resetSelectedLabelPosition() {
 function resetSelectedMeasurementLayout() {
   if (!selected.value) return;
   selected.value.measurementOffsets = [];
-  selected.value.hiddenMeasurements = [];
+  // Keep side visibility and combined totals when only resetting placement.
   selected.value.measurementSideOverrides = [];
   selected.value.measurementDistance = 0;
   selected.value.measurementSide = "normal";
   recordHistory();
-  notify("Measurement labels returned to automatic positions.");
+  notify("Measurement positions reset. Hidden sides and combined totals were kept.");
 }
 function groupSelected() {
   if (selectedCount.value < 2) return;
@@ -697,7 +1013,7 @@ function mergeSelectedPoints() {
 function combineOverlappingLines() {
   const lines = selectedStraightLines.value;
   if (lines.length < 2) {
-    notify("Select at least two straight lines that overlap or touch.");
+    notify("Select at least two straight line objects that touch or overlap.");
     return;
   }
 
@@ -749,7 +1065,7 @@ function combineOverlappingLines() {
   });
   const mergeable = [...clusters.values()].filter((cluster) => cluster.length > 1);
   if (!mergeable.length) {
-    notify("No selected lines overlap on the same path. Lines with different thickness or color stay separate.");
+    notify("No selected lines form one straight touching or overlapping run. Different thicknesses or colors stay separate.");
     return;
   }
 
@@ -795,7 +1111,9 @@ function combineOverlappingLines() {
       text: firstLabel,
       measurementOffsets: [],
       hiddenMeasurements: [],
+      shownMeasurements: [],
       measurementSideOverrides: [],
+      measurementRunIds: [],
     });
     cluster.slice(1).forEach((line) => removals.add(line.id));
     keepSelected.push(base.id);
@@ -806,7 +1124,7 @@ function combineOverlappingLines() {
     .map((item) => replacements.get(item.id) || item);
   setSelection(keepSelected, keepSelected.at(-1) || null);
   recordHistory();
-  notify(`${mergeable.length} overlapping wall ${mergeable.length === 1 ? "run" : "runs"} combined. Undo restores the original lines.`);
+  notify(`${mergeable.length} straight line ${mergeable.length === 1 ? "run" : "runs"} merged. Undo restores the original lines.`);
 }
 function splitSelectedLength() {
   if (!canSplitSelectedLine.value) {
@@ -855,6 +1173,7 @@ function duplicateSelected() {
   // *within* the copied selection by remapping each relationship to a fresh id.
   const groupIds = new Map();
   const pointLinkIds = new Map();
+  const measurementRunIds = new Map();
   const duplicates = selectedItems.value.map((item) => {
     const copy = clone(item);
     copy.id = uid();
@@ -869,6 +1188,13 @@ function duplicateSelected() {
       if (!linkId) return "";
       if (!pointLinkIds.has(linkId)) pointLinkIds.set(linkId, uid());
       return pointLinkIds.get(linkId);
+    });
+
+    // Combined measurement totals in a duplicate must stay internal to the copy.
+    copy.measurementRunIds = (copy.measurementRunIds || []).map((runId) => {
+      if (!runId) return "";
+      if (!measurementRunIds.has(runId)) measurementRunIds.set(runId, uid());
+      return measurementRunIds.get(runId);
     });
 
     return copy;
@@ -1397,6 +1723,8 @@ function replaceReport(value, newRevision = 0, snapshot = null) {
   history.value = [JSON.stringify(normalized)];
   historyIndex.value = 0;
   clearSelection();
+  measurementEditMode.value = false;
+  selectedMeasurementRefs.value = [];
   // Reopened/imported drawings start in Select so existing marks are immediately editable.
   // A genuinely blank report still starts in Outline for the normal drawing workflow.
   tool.value = normalized.items.length ? "select" : "outline";
@@ -1931,11 +2259,14 @@ onBeforeUnmount(() => {
             <ScanLine :size="15" /> {{ report.graphStyle.showMeasurements ? 'Dims on' : 'Dims off' }}
           </button>
           <button
+            v-if="tool === 'select'"
             class="toolbar-pill"
-            title="Reset every measurement to automatic placement"
-            @click="resetAllMeasurementLayout"
+            :class="{ active: measurementEditMode }"
+            :aria-pressed="measurementEditMode"
+            title="Tap measurement values to hide sides or combine straight runs"
+            @click="toggleMeasurementEditMode"
           >
-            <RotateCcw :size="15" /> Reflow dims
+            <Link2 :size="15" /> {{ measurementEditMode ? 'Side edit on' : 'Edit sides' }}
           </button>
           <label class="snap-toggle"
             ><input v-model="snap" type="checkbox" /><span
@@ -1985,12 +2316,57 @@ onBeforeUnmount(() => {
           :graph-style="report.graphStyle"
           :line-auto-connect="lineAutoConnect"
           :multi-select-mode="multiSelectMode"
+          :measurement-edit-mode="measurementEditMode"
+          :selected-measurements="selectedMeasurementRefs"
           @change="changeItems"
           @select-tool="setTool"
           @quick-action="handleGraphQuickAction"
+          @measurement-select="toggleMeasurementSelection"
           @position="position = $event"
         />
-        <div v-if="selectedCount" class="mobile-selection-actions" aria-label="Selected object actions">
+        <div
+          v-if="measurementEditMode"
+          class="measurement-edit-bar"
+          aria-label="Measurement side editing"
+        >
+          <div class="measurement-edit-copy">
+            <strong>Measurement sides</strong>
+            <span>Tap dimension values to select sides.</span>
+          </div>
+          <span class="selection-chip">
+            {{ selectedMeasurementCount }} selected
+            <template v-if="selectedMeasurementTotal"> · {{ selectedMeasurementTotal }}</template>
+          </span>
+          <button
+            class="btn btn-secondary btn-mini"
+            :disabled="!canCombineSelectedMeasurements"
+            title="Create one full-span dimension from straight touching or overlapping sides"
+            @click="combineSelectedMeasurementSides"
+          >
+            <Link2 :size="15" /> Combine length
+          </button>
+          <button
+            class="btn btn-secondary btn-mini"
+            :disabled="!selectedMeasurementHasRun"
+            @click="separateSelectedMeasurementSides"
+          >
+            <Unlink :size="15" /> Separate
+          </button>
+          <button
+            class="btn btn-secondary btn-mini"
+            :disabled="!selectedMeasurementCount"
+            @click="hideSelectedMeasurementSides"
+          >
+            Hide sides
+          </button>
+          <button class="btn btn-secondary btn-mini" @click="resetAllMeasurementLayout">
+            <RotateCcw :size="15" /> Reflow
+          </button>
+          <button class="btn btn-primary btn-mini" @click="toggleMeasurementEditMode">
+            Done
+          </button>
+        </div>
+        <div v-if="selectedCount && !measurementEditMode" class="mobile-selection-actions" aria-label="Selected object actions">
           <span>{{ selectedCount }} selected</span>
           <button class="btn btn-secondary" @click="panelOpen = true"><Settings2 :size="16" /> Edit</button>
           <button class="btn btn-secondary" @click="duplicateSelected"><Layers :size="16" /> Copy</button>
@@ -2208,39 +2584,107 @@ onBeforeUnmount(() => {
                 "
               />
             </label>
-            <div v-if="selectedSupportsMeasurement && selected.showMeasurements !== false" class="annotation-controls measurement-layout-controls">
-              <span>Measurement placement</span>
-              <p>Measurements stay attached to the wall they describe. Press and hold a value on the graph to hide it, return it to Auto, or flip it to the other side. Labels can still be moved freely.</p>
-              <div class="field-pair">
-                <label class="field">
-                  <span>Measurement side</span>
-                  <select
-                    :value="selected.measurementSide || 'normal'"
-                    @change="patchSelected('measurementSide', $event.target.value); recordHistory()"
+            <div
+              v-if="selectedSupportsMeasurement && selected.showMeasurements !== false"
+              class="measurement-object-controls"
+            >
+              <details
+                v-if="selectedSupportsSideControls"
+                class="compact-settings measured-sides"
+                open
+              >
+                <summary>
+                  <span>Measured sides</span>
+                  <small>
+                    {{ selectedShownMeasurementCount }}/{{ selectedMeasurementSides.length }} shown
+                  </small>
+                </summary>
+                <div class="measurement-side-list">
+                  <div
+                    v-for="side in selectedMeasurementSides"
+                    :key="side.index"
+                    class="measurement-side-row"
                   >
-                    <option value="normal">Side 1</option>
-                    <option value="opposite">Opposite side</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>Distance from wall</span>
-                  <select
-                    :value="selected.measurementDistance || 0"
-                    @change="patchSelected('measurementDistance', Number($event.target.value)); recordHistory()"
+                    <label>
+                      <input
+                        type="checkbox"
+                        :checked="side.visible"
+                        @change="setSelectedMeasurementSideVisible(side.index, $event.target.checked)"
+                      />
+                      <span>
+                        <strong>{{ side.name }}</strong>
+                        <small>{{ side.text }}</small>
+                      </span>
+                    </label>
+                    <button
+                      v-if="side.runId"
+                      class="side-run-button"
+                      type="button"
+                      title="Return this combined total to individual side measurements"
+                      @click="separateMeasurementRun(side.runId)"
+                    >
+                      <Link2 :size="13" /> Combined
+                    </button>
+                  </div>
+                </div>
+                <div class="mini-actions measurement-side-actions">
+                  <button class="btn btn-secondary btn-mini" @click="showAllSelectedMeasurementSides">
+                    Show all sides
+                  </button>
+                  <button
+                    class="btn btn-secondary btn-mini"
+                    :class="{ active: measurementEditMode }"
+                    @click="toggleMeasurementEditMode"
                   >
-                    <option :value="-4">Tighter</option>
-                    <option :value="0">Normal</option>
-                    <option :value="8">A little farther</option>
-                    <option :value="18">Farther</option>
-                    <option :value="30">Wide</option>
-                  </select>
-                </label>
-              </div>
-              <div class="mini-actions measurement-reset-actions">
-                <button v-if="canSplitSelectedLine" class="btn btn-secondary btn-mini" @click="splitSelectedLength">Split length</button>
-                <button class="btn btn-secondary btn-mini" @click="resetSelectedMeasurementLayout">Reset / show all dimensions</button>
-                <span v-if="selectedHiddenMeasurementCount" class="selection-chip">{{ selectedHiddenMeasurementCount }} hidden</span>
-              </div>
+                    <Link2 :size="14" /> Combine lengths on graph
+                  </button>
+                </div>
+              </details>
+              <details class="compact-settings">
+                <summary>Position & spacing</summary>
+                <div class="measurement-position-body">
+                  <div class="field-pair">
+                    <label class="field">
+                      <span>Side of wall</span>
+                      <select
+                        :value="selected.measurementSide || 'normal'"
+                        @change="patchSelected('measurementSide', $event.target.value); recordHistory()"
+                      >
+                        <option value="normal">Default side</option>
+                        <option value="opposite">Opposite side</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>Distance</span>
+                      <select
+                        :value="selected.measurementDistance || 0"
+                        @change="patchSelected('measurementDistance', Number($event.target.value)); recordHistory()"
+                      >
+                        <option :value="-4">Tighter</option>
+                        <option :value="0">Normal</option>
+                        <option :value="8">A little farther</option>
+                        <option :value="18">Farther</option>
+                        <option :value="30">Wide</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="mini-actions measurement-reset-actions">
+                    <button
+                      v-if="canSplitSelectedLine"
+                      class="btn btn-secondary btn-mini"
+                      @click="splitSelectedLength"
+                    >
+                      Split length
+                    </button>
+                    <button
+                      class="btn btn-secondary btn-mini"
+                      @click="resetSelectedMeasurementLayout"
+                    >
+                      Reset this object
+                    </button>
+                  </div>
+                </div>
+              </details>
             </div>
             <div v-if="selectedSupportsRotation" class="field-pair">
               <label class="field"
@@ -2412,12 +2856,12 @@ onBeforeUnmount(() => {
               <button class="btn btn-secondary" @click="setSelectedMeasurements(false)">Measurements off</button>
               <button class="btn btn-secondary" @click="groupSelected"><Layers :size="15" /> Group shapes</button>
               <button class="btn btn-secondary" :disabled="!selectedHasGroup" @click="ungroupSelected">Ungroup shapes</button>
-              <button class="btn btn-secondary" :disabled="!canCombineSelectedLines" @click="combineOverlappingLines">Combine overlapping walls</button>
+              <button class="btn btn-secondary" :disabled="!canCombineSelectedLines" @click="combineOverlappingLines">Merge selected lines</button>
               <button class="btn btn-secondary" @click="mergeSelectedPoints">Join nearby corners</button>
               <button class="btn btn-secondary" :disabled="!selectedHasLinkedPoints" @click="unmergeSelectedPoints">Release joined corners</button>
             </div>
             <p class="small-help">
-              Combine overlapping walls turns duplicate straight runs into one clean line and one combined measurement. Join nearby corners keeps separate shapes connected at a shared point. Grouping only makes objects move together. Undo reverses a wall combine.
+              Merge selected lines changes the drawing itself by replacing compatible touching or overlapping line objects with one clean line. Combine length is the non-destructive choice when you only want one longer dimension. Join nearby corners keeps separate shapes attached at a shared point; Group only moves objects together.
             </p>
             <div class="multi-select-list">
               <span v-for="item in selectedItems" :key="item.id" class="selection-chip">{{ item.type }}</span>
@@ -2434,91 +2878,72 @@ onBeforeUnmount(() => {
         </template>
         <div class="panel-heading">
           <div>
-            <span class="eyebrow">ADD TO YOUR GRAPH</span>
-            <h2>Top-down objects & marks</h2>
+            <span class="eyebrow">TOOLS & MARKS</span>
+            <h2>Add to graph</h2>
           </div>
           <MapPinned :size="21" class="muted" />
         </div>
-        <div class="panel-section">
-          <h3>Structure</h3>
+        <div class="panel-section tool-family-panel">
+          <div class="section-heading">
+            <h3>Draw</h3>
+            <span>CORE TOOLS</span>
+          </div>
           <div class="structure-buttons">
-            <button
-              :class="{ active: tool === 'garage' }"
-              @click="
-                setTool('garage');
-                panelOpen = false;
-              "
-            >
-              <House :size="18" /> Garage</button
-            ><button
-              :class="{ active: tool === 'crawlspace' }"
-              @click="
-                setTool('crawlspace');
-                panelOpen = false;
-              "
-            >
-              <Square :size="18" /> Crawlspace</button
-            ><button
-              :class="{ active: tool === 'hatch' }"
-              @click="
-                setTool('hatch');
-                panelOpen = false;
-              "
-            >
-              <Grid2X2 :size="18" /> Diagonal area</button
-            ><button
-              :class="{ active: tool === 'hatchpoly' }"
-              @click="
-                setTool('hatchpoly');
-                panelOpen = false;
-              "
-            >
-              <Grid2X2 :size="18" /> Hatch polygon</button
-            ><button
-              :class="{ active: tool === 'rounded' }"
-              @click="
-                setTool('rounded');
-                panelOpen = false;
-              "
-            >
-              <Square :size="18" /> Rounded area</button
-            ><button
-              :class="{ active: tool === 'beveled' }"
-              @click="
-                setTool('beveled');
-                panelOpen = false;
-              "
-            >
-              <Square :size="18" /> Beveled area</button
-            ><button
-              :class="{ active: tool === 'ellipse' }"
-              @click="
-                setTool('ellipse');
-                panelOpen = false;
-              "
-            >
-              <Circle :size="18" /> Oval / circle</button
-            ><button
-              :class="{ active: tool === 'curvearea' }"
-              @click="
-                setTool('curvearea');
-                panelOpen = false;
-              "
-            >
-              <Pencil :size="18" /> Curved hatch area</button
-            ><button
-              @click="selectSymbol(SYMBOLS.find((s) => s.key === 'door'))"
-            >
-              <span class="door-symbol">Z</span> Crawlspace door</button
-            ><button
-              @click="
-                setTool('label');
-                panelOpen = false;
-              "
-            >
-              <Type :size="18" /> Custom label
+            <button :class="{ active: tool === 'outline' }" @click="setTool('outline'); panelOpen = false">
+              <ScanLine :size="18" /> Outline
+            </button>
+            <button :class="{ active: tool === 'line' }" @click="setTool('line'); panelOpen = false">
+              <MoveUpRight :size="18" /> Line
+            </button>
+            <button :class="{ active: tool === 'rect' }" @click="setTool('rect'); panelOpen = false">
+              <Square :size="18" /> Area
+            </button>
+            <button :class="{ active: tool === 'curve' }" @click="setTool('curve'); panelOpen = false">
+              <Pencil :size="18" /> Curve
+            </button>
+            <button :class="{ active: tool === 'freehand' }" @click="setTool('freehand'); panelOpen = false">
+              <Pencil :size="18" /> Draw
+            </button>
+            <button :class="{ active: tool === 'label' }" @click="setTool('label'); panelOpen = false">
+              <Type :size="18" /> Label
             </button>
           </div>
+
+          <details class="compact-settings tool-family">
+            <summary>Area shapes & hatching</summary>
+            <div class="structure-buttons nested-tool-buttons">
+              <button :class="{ active: tool === 'hatch' }" @click="setTool('hatch'); panelOpen = false">
+                <Grid2X2 :size="18" /> Hatched area
+              </button>
+              <button :class="{ active: tool === 'hatchpoly' }" @click="setTool('hatchpoly'); panelOpen = false">
+                <Grid2X2 :size="18" /> Hatched outline
+              </button>
+              <button :class="{ active: tool === 'rounded' }" @click="setTool('rounded'); panelOpen = false">
+                <Square :size="18" /> Rounded area
+              </button>
+              <button :class="{ active: tool === 'beveled' }" @click="setTool('beveled'); panelOpen = false">
+                <Square :size="18" /> Beveled area
+              </button>
+              <button :class="{ active: tool === 'ellipse' }" @click="setTool('ellipse'); panelOpen = false">
+                <Circle :size="18" /> Oval / circle
+              </button>
+              <button :class="{ active: tool === 'curvearea' }" @click="setTool('curvearea'); panelOpen = false">
+                <Pencil :size="18" /> Curved hatched area
+              </button>
+            </div>
+          </details>
+
+          <details class="compact-settings tool-family">
+            <summary>Room presets</summary>
+            <div class="structure-buttons nested-tool-buttons">
+              <button :class="{ active: tool === 'garage' }" @click="setTool('garage'); panelOpen = false">
+                <House :size="18" /> Garage
+              </button>
+              <button :class="{ active: tool === 'crawlspace' }" @click="setTool('crawlspace'); panelOpen = false">
+                <Square :size="18" /> Crawlspace
+              </button>
+            </div>
+          </details>
         </div>
         <div class="panel-section">
           <div class="section-heading">
@@ -2528,7 +2953,7 @@ onBeforeUnmount(() => {
           <div class="symbol-list">
             <button
               v-for="symbol in symbols.filter(
-                (s) => !['door', 'north', 'steps'].includes(s.key),
+                (s) => !['north', 'steps'].includes(s.key),
               )"
               :key="symbol.key"
               :class="{
@@ -3049,10 +3474,11 @@ onBeforeUnmount(() => {
 
     <ModalShell v-if="modal === 'measurement-help'" title="Measurement display" @close="modal = null">
       <div class="concise-help">
-        <p><strong>Reflow dims</strong> returns every dimension to the recommended Smart + Clean layout and clears per-wall flips or hidden values.</p>
-        <p><strong>Clean</strong> keeps dimensions close to their wall. If a value still cannot fit clearly, it is temporarily omitted instead of being moved somewhere confusing.</p>
-        <p><strong>Show every value</strong> forces crowded dimensions to remain visible. Use it only when you need to inspect every segment.</p>
-        <p>Labels can still be moved freely because their ownership is obvious. Measurements intentionally cannot be free-dragged.</p>
+        <p><strong>Measured sides</strong> lets you turn each wall/side on or off independently. Box defaults stay compact, but you can explicitly show any side.</p>
+        <p><strong>Combine length</strong> joins straight touching or overlapping side measurements into one full-span total without changing the underlying shapes.</p>
+        <p><strong>Merge selected lines</strong> is different: it actually turns compatible straight line objects into one line.</p>
+        <p><strong>Reflow</strong> resets placement and side-flips while keeping sides you intentionally hid and totals you intentionally combined.</p>
+        <p><strong>Clean</strong> keeps dimensions close to their wall. If a value cannot fit clearly, it is omitted instead of being moved somewhere misleading. Labels remain freely movable.</p>
       </div>
       <button class="btn btn-primary w-full mt-5" @click="modal = null">Done</button>
     </ModalShell>
@@ -3077,13 +3503,13 @@ onBeforeUnmount(() => {
           the outline.
         </p>
         <p>
-          <strong>Rounded, beveled, curved, and hatched areas</strong>Use Rounded for radius corners, Bevel for chamfered corners, Oval for circles/ellipses, Hatch polygon for irregular slabs, or Curved area for gardens and curved sidewalks. Any closed area can use diagonal, crosshatch, horizontal, or vertical marks.
+          <strong>Area shapes & hatching</strong>Use Area for a plain rectangle. Open Area shapes & hatching for Hatched area, Hatched outline, Rounded, Beveled, Oval, or Curved hatched area. Any closed shape can still change its pattern later from Edit.
         </p>
         <p>
           <strong>Move, reshape, labels, and dimensions</strong>Choose Select. Drag a shape to move it, white handles to move vertices, optional geometry labels to reposition their text. Dimensions stay constrained to their wall; use Reflow, Hide, or Flip side when a dense area needs cleanup. Tap a line/outline point for its direct delete control. Press and hold a point, dimension, object, or empty canvas for context-specific radial actions and quick tools.
         </p>
         <p>
-          <strong>Combine, group, or join geometry</strong>Use Multi-select to select several objects. Combine overlapping walls removes duplicate straight runs and combines their measurements. Group makes shapes move together. Join nearby corners keeps separate shapes attached at one point; Release joined corners separates them again.
+          <strong>Combine lengths vs merge lines</strong>Use Edit sides and tap dimension values when you only want one longer measurement across straight touching sides. Use Multi-select → Merge selected lines when you actually want compatible line objects replaced by one line. Group moves objects together; Join nearby corners keeps separate shapes attached at a point.
         </p>
         <p>
           <strong>Repeated lines</strong>Line stays active so you can trace wall

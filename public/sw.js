@@ -1,6 +1,6 @@
 // Termite Fieldbook production shell cache.
 // Report saves remain in browser/device storage and API requests are never cached.
-const CACHE_NAME = "termite-fieldbook-v1.5.4";
+const CACHE_NAME = "termite-fieldbook-v1.5.5";
 const CORE = [
   "/",
   "/index.html",

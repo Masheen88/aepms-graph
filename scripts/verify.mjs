@@ -142,9 +142,11 @@ oldRevision.schemaRevision = 2;
 delete oldRevision.items[0].hiddenMeasurements;
 delete oldRevision.items[0].measurementSideOverrides;
 const migrated = reportSchema.parse(oldRevision);
-assert.equal(migrated.schemaRevision, 6, "Older saves must normalize to schema revision 6");
+assert.equal(migrated.schemaRevision, 7, "Older saves must normalize to schema revision 7");
 assert.deepEqual(migrated.items[0].hiddenMeasurements, []);
 assert.deepEqual(migrated.items[0].measurementSideOverrides, []);
+assert.deepEqual(migrated.items[0].shownMeasurements, [], "Older saves must default to no explicit side overrides");
+assert.deepEqual(migrated.items[0].measurementRunIds, [], "Older saves must default to no combined measurement runs");
 assert.deepEqual(migrated.items[0].measurementOffsets, [], "Older manual dimension drags must reset to automatic layout");
 assert.equal(migrated.graphStyle.measurementPlacement, "smart");
 assert.equal(migrated.graphStyle.measurementOrientation, "horizontal");
@@ -220,6 +222,30 @@ for (const mark of nearbyEntries.flatMap((entry) => entry.marks).filter((mark) =
     "Smart measurement layout must stay close enough to the wall that ownership is obvious",
   );
 }
+
+// v1.5.5 combined measurement runs must render one full-span value without changing geometry.
+const runA = clone(report.items.find((item) => item.type === "line"));
+runA.id = crypto.randomUUID();
+runA.points = [{ x: 100, y: 100 }, { x: 200, y: 100 }];
+runA.showMeasurements = true;
+runA.hiddenMeasurements = [];
+runA.shownMeasurements = [0];
+runA.measurementRunIds = ["test-run"];
+const runB = clone(runA);
+runB.id = crypto.randomUUID();
+runB.points = [{ x: 200, y: 100 }, { x: 230, y: 100 }];
+const combinedEntries = primitivesForItems([runA, runB], {
+  feetPerSquare: 1,
+  gridUnit: "ft",
+  graphStyle: { ...report.graphStyle, showMeasurements: true, measurementCrowding: "all" },
+});
+const combinedMarks = combinedEntries
+  .flatMap((entry) => entry.marks)
+  .filter((mark) => mark.measurement);
+assert.equal(combinedMarks.length, 1, "A combined run must render one dimension value");
+assert.equal(combinedMarks[0].text, "13 ft", "Touching 10 ft + 3 ft segments must show their full 13 ft span");
+assert.equal(combinedMarks[0].measurementCombined, true);
+assert.deepEqual(runA.points, [{ x: 100, y: 100 }, { x: 200, y: 100 }], "Combining dimensions must not mutate wall geometry");
 
 const rotatedDoor = primitives(
   clone(report.items.find((item) => item.symbol === "door")),
@@ -381,5 +407,5 @@ assert.equal(
   1950,
 );
 console.log(
-  "PASS: validation, optional technician statements, company logo output, 1-unit default scale, scale-aware snapping, resizing, rounded/beveled/oval areas, hidden labels, per-object/per-segment measurements, schema migration, smart dimension layout, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
+  "PASS: validation, optional technician statements, company logo output, 1-unit default scale, scale-aware snapping, resizing, rounded/beveled/oval areas, hidden labels, per-object/per-side measurements, combined dimension runs, schema migration, smart dimension layout, smooth curves, rotated symbols, hatch/dimensions, edge movement, durable saves, stale revision conflicts, request origin, clean two-page Letter export, original size, Unicode, and complete note overflow.",
 );

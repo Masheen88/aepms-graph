@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
+  ArrowLeft,
   Plus,
   Minus,
   Maximize,
@@ -15,7 +16,9 @@ import {
   RotateCcw,
   FlipHorizontal2,
   Unlink,
+  Circle,
   CircleEllipsis,
+  Pencil,
   Ruler,
   ScanLine,
   Square,
@@ -49,6 +52,8 @@ const props = defineProps({
   graphStyle: { type: Object, default: () => ({}) },
   lineAutoConnect: { type: Boolean, default: true },
   multiSelectMode: { type: Boolean, default: false },
+  measurementEditMode: { type: Boolean, default: false },
+  selectedMeasurements: { type: Array, default: () => [] },
 });
 const emit = defineEmits([
   "update:items",
@@ -58,6 +63,7 @@ const emit = defineEmits([
   "select-tool",
   "position",
   "quick-action",
+  "measurement-select",
 ]);
 const wrap = ref(null),
   svg = ref(null),
@@ -85,7 +91,12 @@ const laidOutMarks = computed(() => {
   const entries = primitivesForItems(props.items, {
     feetPerSquare: props.feetPerSquare,
     gridUnit: props.gridUnit,
-    graphStyle: props.graphStyle,
+    // While editing sides, keep every otherwise-visible value tappable even if the
+    // normal Clean layout would suppress it for crowding. Leaving side edit restores
+    // the user's actual display preference.
+    graphStyle: props.measurementEditMode
+      ? { ...props.graphStyle, measurementCrowding: "all" }
+      : props.graphStyle,
   });
   return new Map(entries.map((entry) => [entry.id, entry.marks]));
 });
@@ -124,6 +135,35 @@ function denseArrayValue(source, index, value, filler) {
   while (next.length <= index) next.push(typeof filler === "function" ? filler() : filler);
   next[index] = value;
   return next;
+}
+function denseStringValue(source, index, value = "") {
+  const next = Array.isArray(source) ? [...source] : [];
+  while (next.length <= index) next.push("");
+  next[index] = value;
+  return next;
+}
+
+function measurementRunMembers(runId) {
+  if (!runId) return [];
+  return props.items.flatMap((item) =>
+    (item.measurementRunIds || [])
+      .map((currentRunId, index) => ({ itemId: item.id, index, currentRunId }))
+      .filter((entry) => entry.currentRunId === runId),
+  );
+}
+
+function updateMeasurementMembers(members, updater) {
+  const items = props.items.map((item) => {
+    const indexes = members
+      .filter((member) => member.itemId === item.id)
+      .map((member) => member.index);
+    if (!indexes.length) return item;
+    let next = { ...item };
+    for (const index of indexes) next = updater(next, index);
+    return next;
+  });
+  updateItems(items);
+  commit(items);
 }
 const resizeHandles = computed(() => {
   if (!selectedBounds.value || singleSelected.value?.points.length < 2) return [];
@@ -226,7 +266,9 @@ function insertPointAtSegment(segmentIndex) {
           pointLinks,
           measurementOffsets: [],
           hiddenMeasurements: [],
+          shownMeasurements: [],
           measurementSideOverrides: [],
+          measurementRunIds: [],
           measurementDistance: 0,
           measurementSide: "normal",
         }
@@ -266,7 +308,9 @@ function deletePoint(itemId, index) {
           // layout metadata rather than risking stale offsets on the wrong wall.
           measurementOffsets: [],
           hiddenMeasurements: [],
+          shownMeasurements: [],
           measurementSideOverrides: [],
+          measurementRunIds: [],
         }
       : entry,
   );
@@ -285,27 +329,30 @@ function releasePointWeld(itemId, index) {
   updateItems(items);
   commit(items);
 }
-function hideMeasurement(itemId, index) {
-  const items = props.items.map((entry) => {
-    if (entry.id !== itemId) return entry;
-    const hiddenMeasurements = [...new Set([...(entry.hiddenMeasurements || []), index])];
-    return { ...entry, hiddenMeasurements };
-  });
-  updateItems(items);
-  commit(items);
+function hideMeasurement(itemId, index, runId = "") {
+  const members = runId ? measurementRunMembers(runId) : [{ itemId, index }];
+  updateMeasurementMembers(members, (entry, memberIndex) => ({
+    ...entry,
+    hiddenMeasurements: [
+      ...new Set([...(entry.hiddenMeasurements || []), memberIndex]),
+    ],
+    shownMeasurements: (entry.shownMeasurements || []).filter(
+      (value) => value !== memberIndex,
+    ),
+  }));
 }
-function resetMeasurement(itemId, index) {
-  const items = props.items.map((entry) => {
-    if (entry.id !== itemId) return entry;
+function resetMeasurement(itemId, index, runId = "") {
+  const members = runId ? measurementRunMembers(runId) : [{ itemId, index }];
+  updateMeasurementMembers(members, (entry, memberIndex) => {
     const measurementOffsets = denseArrayValue(
       entry.measurementOffsets,
-      index,
+      memberIndex,
       { x: 0, y: 0 },
       () => ({ x: 0, y: 0 }),
     );
     const measurementSideOverrides = denseArrayValue(
       entry.measurementSideOverrides,
-      index,
+      memberIndex,
       "inherit",
       "inherit",
     );
@@ -313,32 +360,42 @@ function resetMeasurement(itemId, index) {
       ...entry,
       measurementOffsets,
       measurementSideOverrides,
-      hiddenMeasurements: (entry.hiddenMeasurements || []).filter((value) => value !== index),
+      hiddenMeasurements: (entry.hiddenMeasurements || []).filter(
+        (value) => value !== memberIndex,
+      ),
     };
   });
-  updateItems(items);
-  commit(items);
 }
-function flipMeasurement(itemId, index) {
-  const items = props.items.map((entry) => {
-    if (entry.id !== itemId) return entry;
-    const current = entry.measurementSideOverrides?.[index] === "inherit" || !entry.measurementSideOverrides?.[index]
-      ? entry.measurementSide || "normal"
-      : entry.measurementSideOverrides[index];
+function flipMeasurement(itemId, index, runId = "") {
+  const members = runId ? measurementRunMembers(runId) : [{ itemId, index }];
+  updateMeasurementMembers(members, (entry, memberIndex) => {
+    const current =
+      entry.measurementSideOverrides?.[memberIndex] === "inherit" ||
+      !entry.measurementSideOverrides?.[memberIndex]
+        ? entry.measurementSide || "normal"
+        : entry.measurementSideOverrides[memberIndex];
     const overrides = denseArrayValue(
       entry.measurementSideOverrides,
-      index,
+      memberIndex,
       current === "opposite" ? "normal" : "opposite",
       "inherit",
     );
     return {
       ...entry,
       measurementSideOverrides: overrides,
-      hiddenMeasurements: (entry.hiddenMeasurements || []).filter((value) => value !== index),
+      hiddenMeasurements: (entry.hiddenMeasurements || []).filter(
+        (value) => value !== memberIndex,
+      ),
     };
   });
-  updateItems(items);
-  commit(items);
+}
+function separateMeasurementRun(runId) {
+  const members = measurementRunMembers(runId);
+  if (!members.length) return;
+  updateMeasurementMembers(members, (entry, memberIndex) => ({
+    ...entry,
+    measurementRunIds: denseStringValue(entry.measurementRunIds, memberIndex, ""),
+  }));
 }
 function toggleSelectionMeasurements() {
   if (!selectedItems.value.length) return;
@@ -363,7 +420,6 @@ function resetSelectionAnnotations() {
           ...item,
           labelOffset: { x: 0, y: 0 },
           measurementOffsets: [],
-          hiddenMeasurements: [],
           measurementSideOverrides: [],
         }
       : item,
@@ -395,11 +451,23 @@ const radialActions = computed(() => {
     return actions;
   }
   if (context.kind === "measurement") {
-    return [
-      { id: "hide-measurement", label: "Hide", icon: EyeOff },
-      { id: "reset-measurement", label: "Auto", icon: RotateCcw },
+    const actions = [
+      {
+        id: "hide-measurement",
+        label: context.runId ? "Hide total" : "Hide side",
+        icon: EyeOff,
+      },
+      { id: "reset-measurement", label: "Reset side", icon: RotateCcw },
       { id: "flip-measurement", label: "Flip side", icon: FlipHorizontal2 },
     ];
+    if (context.runId) {
+      actions.push({
+        id: "separate-measurement-run",
+        label: "Separate",
+        icon: Unlink,
+      });
+    }
+    return actions;
   }
   if (context.kind === "item") {
     const measurable = selectedItems.value.some((item) =>
@@ -427,7 +495,7 @@ const radialActions = computed(() => {
     if (straightLines.length >= 2)
       actions.splice(actions.length - 1, 0, {
         id: "combine-lines",
-        label: "Combine walls",
+        label: "Merge lines",
         icon: ScanLine,
       });
     if (straightLines.length === 1 && selectedItems.value.length === 1)
@@ -439,15 +507,41 @@ const radialActions = computed(() => {
     return actions;
   }
   if (context.kind === "canvas") {
+    // Empty-canvas radial is tools only. Editing commands live on the thing they edit,
+    // which keeps the ring predictable for non-technical field users.
     return [
       { id: "tool:outline", label: "Outline", icon: ScanLine },
       { id: "tool:line", label: "Line", icon: MoveUpRight },
       { id: "tool:rect", label: "Area", icon: Square },
-      { id: "tool:hatch", label: "Hatch", icon: Grid2X2 },
       { id: "tool:label", label: "Label", icon: Type },
-      { id: "tool:pan", label: "Pan", icon: Hand },
       { id: "tool:select", label: "Select", icon: MousePointer2 },
-      { id: "reset-all-measurements", label: "Reflow dims", icon: RotateCcw },
+      { id: "tool:pan", label: "Pan", icon: Hand },
+      { id: "more-tools", label: "More", icon: CircleEllipsis },
+    ];
+  }
+  if (context.kind === "canvas-more") {
+    return [
+      { id: "more-areas", label: "Areas", icon: Square },
+      { id: "more-sketch", label: "Sketch", icon: Pencil },
+      { id: "back-tools", label: "Back", icon: ArrowLeft },
+    ];
+  }
+  if (context.kind === "canvas-areas") {
+    return [
+      { id: "tool:hatch", label: "Hatched area", icon: Grid2X2 },
+      { id: "tool:hatchpoly", label: "Hatched outline", icon: Grid2X2 },
+      { id: "tool:rounded", label: "Rounded", icon: Square },
+      { id: "tool:beveled", label: "Beveled", icon: Square },
+      { id: "tool:ellipse", label: "Oval", icon: Circle },
+      { id: "tool:curvearea", label: "Curved hatch", icon: Pencil },
+      { id: "back-more-tools", label: "Back", icon: ArrowLeft },
+    ];
+  }
+  if (context.kind === "canvas-sketch") {
+    return [
+      { id: "tool:curve", label: "Curve", icon: Pencil },
+      { id: "tool:freehand", label: "Draw", icon: Pencil },
+      { id: "back-more-tools", label: "Back", icon: ArrowLeft },
     ];
   }
   return [];
@@ -468,6 +562,10 @@ function clearLongPress() {
 }
 function closeRadial() {
   radialMenu.value = null;
+}
+function switchRadialContext(context) {
+  if (!radialMenu.value) return;
+  radialMenu.value = { ...radialMenu.value, context };
 }
 function openRadial(clientX, clientY, context) {
   const rect = wrap.value?.getBoundingClientRect();
@@ -511,6 +609,26 @@ function openQuickToolRadial() {
 function runRadialAction(actionId) {
   const context = radialMenu.value?.context;
   if (!context) return;
+  if (actionId === "more-tools") {
+    switchRadialContext({ kind: "canvas-more" });
+    return;
+  }
+  if (actionId === "back-tools") {
+    switchRadialContext({ kind: "canvas" });
+    return;
+  }
+  if (actionId === "more-areas") {
+    switchRadialContext({ kind: "canvas-areas" });
+    return;
+  }
+  if (actionId === "more-sketch") {
+    switchRadialContext({ kind: "canvas-sketch" });
+    return;
+  }
+  if (actionId === "back-more-tools") {
+    switchRadialContext({ kind: "canvas-more" });
+    return;
+  }
   if (actionId.startsWith("tool:")) {
     emit("select-tool", actionId.slice(5));
   } else if (actionId === "delete-point") {
@@ -520,11 +638,13 @@ function runRadialAction(actionId) {
   } else if (actionId === "release-point") {
     releasePointWeld(context.itemId, context.index);
   } else if (actionId === "hide-measurement") {
-    hideMeasurement(context.itemId, context.index);
+    hideMeasurement(context.itemId, context.index, context.runId || "");
   } else if (actionId === "reset-measurement") {
-    resetMeasurement(context.itemId, context.index);
+    resetMeasurement(context.itemId, context.index, context.runId || "");
   } else if (actionId === "flip-measurement") {
-    flipMeasurement(context.itemId, context.index);
+    flipMeasurement(context.itemId, context.index, context.runId || "");
+  } else if (actionId === "separate-measurement-run") {
+    separateMeasurementRun(context.runId);
   } else if (actionId === "toggle-measurements") {
     toggleSelectionMeasurements();
   } else if (actionId === "reset-annotations") {
@@ -552,22 +672,22 @@ const hint = computed(
   () =>
     ({
       select:
-        "Tap an object to select it. Tap a white line/outline point to expose its delete control. Hold a point, measurement, object, or empty canvas for quick radial actions. Measurements stay attached to their walls; hold one to hide, reset, or flip it. Reflow dims restores Smart + Clean placement when a dense area becomes confusing. Labels remain freely movable. Select overlapping straight walls to combine them, or split one length into two sections.",
+        "Tap an object to select it. Tap a white line/outline point to expose its delete control. Hold the thing you want to edit for its radial actions. Measurement sides can be hidden individually; use Edit sides above the graph to combine straight touching measurements into one total. Labels remain freely movable. Select straight line objects to merge their geometry, or split one line into two sections.",
       outline:
         "Tap to add corners. Tap the first corner or choose Finish to close.",
       rect: "Drag from one corner to the opposite corner.",
       rounded: "Drag a rounded area. Radius size snaps to the active drawing grid and can be changed in Edit.",
       beveled: "Drag a beveled area. Chamfer size snaps to the active drawing grid and can be changed in Edit.",
       ellipse: "Drag an oval or circular area. Add hatch marks from Edit if needed.",
-      hatch: "Drag a rectangular hatch area, then edit its label or pattern.",
-      hatchpoly: "Tap each corner of an irregular hatch area, then choose Finish.",
+      hatch: "Drag a rectangular hatched area, then edit its label or pattern.",
+      hatchpoly: "Tap each corner of an irregular hatched outline, then choose Finish.",
       garage: "Drag to place a garage.",
       crawlspace: "Drag to place a crawlspace.",
       line: "Drag to draw a line. Line stays active for the next segment; auto-connect can continue from the previous endpoint. Press V or Esc when finished.",
       curve:
         "Drag to draw a curved path. Turn on Closed shape and a hatch pattern afterwards for curved walkways or beds.",
       curvearea:
-        "Draw a curved closed area for gardens or curved sidewalks; it starts with diagonal hatch marks.",
+        "Draw a curved hatched area for gardens, patios, or curved sidewalks.",
       freehand: "Draw with your finger, pen, or mouse.",
       label: "Tap the grid to place a label.",
       point: "Tap to add a point.",
@@ -755,6 +875,7 @@ function pointerDown(event) {
         kind: "measurement",
         itemId: targetId,
         index: Number(holdMeasurement.dataset.measurementIndex),
+        runId: holdMeasurement.dataset.measurementRunId || "",
       });
     } else if (targetId) {
       scheduleLongPress(event, { kind: "item", itemId: targetId });
@@ -787,9 +908,18 @@ function pointerDown(event) {
     const measurement = event.target.closest("[data-measurement-index]");
     const geometryLabel = event.target.closest("[data-geometry-label]");
     if (measurement && targetId) {
+      const payload = {
+        itemId: targetId,
+        index: Number(measurement.dataset.measurementIndex),
+        runId: measurement.dataset.measurementRunId || "",
+      };
+      if (props.measurementEditMode) {
+        emit("measurement-select", payload);
+        return;
+      }
       // Measurements stay attached to their wall. Free dragging made it too easy to
       // create a dimension that visually belonged to the wrong segment. Tap selects
-      // the object; press/hold the value for Hide, Auto, or Flip side.
+      // the owning object; press/hold the value for side-specific actions.
       setSelection([targetId], targetId);
       return;
     }
@@ -1400,6 +1530,7 @@ defineExpose({ fit, cancel, finishOutline, clearLineAnchor });
             :grid-unit="gridUnit"
             :graph-style="graphStyle"
             :marks="laidOutMarks.get(item.id)"
+            :selected-measurements="selectedMeasurements"
           />
         </g>
         <ShapeItem

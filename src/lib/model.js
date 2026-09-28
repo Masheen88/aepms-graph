@@ -95,6 +95,15 @@ const denseMeasurementSideArray = z.preprocess(
       : value,
   z.array(z.enum(["inherit", "normal", "opposite"])).max(6000),
 );
+const denseMeasurementRunArray = z.preprocess(
+  (value) =>
+    Array.isArray(value)
+      ? Array.from({ length: value.length }, (_, index) =>
+          typeof value[index] === "string" ? value[index] : "",
+        )
+      : value,
+  z.array(z.string().max(80)).max(6000),
+);
 const densePointLinkArray = z.preprocess(
   (value) =>
     Array.isArray(value)
@@ -125,7 +134,7 @@ function normalizeReportInput(value) {
       item && typeof item === "object"
         ? {
             ...item,
-            // v1.5.4 fully retires free-floating dimension positions. Older
+            // v1.5.4+ fully retires free-floating dimension positions. Older
             // offsets/side-distance experiments can make a value look attached to the
             // wrong wall, so migration returns location controls to the constrained
             // automatic layout. Deliberately hidden dimensions are preserved.
@@ -218,9 +227,16 @@ export const itemSchema = z
     // Individual dimension labels can be hidden without disabling measurements for the whole object.
     // This is especially useful around dense corners and hatch areas on phone/tablet drawings.
     hiddenMeasurements: z.array(z.number().int().min(0).max(5999)).max(6000).default(() => []),
+    // Explicitly shown sides override the global "simplify boxes" default. This gives
+    // field users true per-side control without making every new 1x1 box show 4 labels.
+    shownMeasurements: z.array(z.number().int().min(0).max(5999)).max(6000).default(() => []),
     // Per-segment side overrides power the canvas radial menu while preserving the existing
     // whole-object side preference for older reports. Missing entries inherit measurementSide.
     measurementSideOverrides: denseMeasurementSideArray.default(() => []),
+    // A measurement run joins compatible sides across separate objects without
+    // destructively changing their geometry. Every segment in the same run shares
+    // one id and renders as a single full-span dimension when the sides still line up.
+    measurementRunIds: denseMeasurementRunArray.default(() => []),
     measurementDistance: z.number().min(-40).max(120).default(0),
     measurementSide: z.enum(["normal", "opposite"]).default("normal"),
     // A lightweight group id keeps grouped shapes reversible instead of destructively merging them.
@@ -251,7 +267,7 @@ export const reportSchema = z.preprocess(
     schemaVersion: z.literal(1),
     // schemaRevision is additive within the v1 backup format. Parsing an older save upgrades
     // it to the latest additive revision while the new item fields below receive safe defaults.
-    schemaRevision: z.number().int().min(1).max(6).default(6).transform(() => 6),
+    schemaRevision: z.number().int().min(1).max(7).default(7).transform(() => 7),
     id: z.string().uuid(),
     title: z.string().min(1).max(80),
     customer: short,
@@ -295,7 +311,7 @@ export function blankReport() {
   });
   return {
     schemaVersion: 1,
-    schemaRevision: 6,
+    schemaRevision: 7,
     id: uid(),
     title: "Untitled inspection",
     customer: "",
@@ -333,7 +349,9 @@ export function newItem(type, points, overrides = {}) {
     labelOffset: { x: 0, y: 0 },
     measurementOffsets: [],
     hiddenMeasurements: [],
+    shownMeasurements: [],
     measurementSideOverrides: [],
+    measurementRunIds: [],
     measurementDistance: 0,
     measurementSide: "normal",
     groupId: "",
